@@ -40,6 +40,13 @@ impl From<ColumnType> for TableColumnType {
 }
 
 #[derive(Deserialize)]
+pub struct InsertRequest {
+    insert: Vec<String>,
+    into: String,
+    values: Vec<Vec<serde_json::Value>>
+}
+
+#[derive(Deserialize)]
 pub struct QueryRequest {
     select: Vec<String>,
     from: String,
@@ -59,30 +66,44 @@ pub async fn create_table(
     State(state): State<AppState>,
     Json(request): Json<CreateTableRequest>,
 ) -> Json<String> {
-    let mut tables = state.open_tables.lock().await;
-
     let columns = request
         .columns
         .into_iter()
         .map(|c| TableColumn::new(c.name, c.ty.into()))
         .collect();
 
-    let table = TableDefinition::new(request.name, columns).load().await;
-    match table {
-        Ok(table) => {
-            tables.insert(table.name().to_string(), table);
-            Json("Table created successfully".to_string())
-        }
-        Err(error) => Json(format!("Could not create table: {}", error)),
+    match TableDefinition::create(request.name, columns).await {
+        Ok(_) => Json("Table created successfully".to_string()),
+        Err(error) => Json(format!("Unable to create table: {}", error)),
     }
 }
 
-pub async fn query_table(
+pub async fn insert(
+    State(state): State<AppState>,
+    Json(request): Json<InsertRequest>,
+) -> Json<String> {
+    let Ok(table_definition) = TableDefinition::open(request.into).await else {
+        return Json("Could not open table".to_string());
+    };
+
+    let Ok(table) = table_definition.load().await else {
+        return Json("Could not load table".to_string());
+    };
+    
+    Json("test".to_string())
+}
+
+pub async fn query(
     State(state): State<AppState>,
     Json(request): Json<QueryRequest>,
 ) -> Json<QueryResponse> {
-    let tables = state.open_tables.lock().await;
-    // TODO: implement querying.
+    let Ok(table_definition) = TableDefinition::open(request.from).await else {
+        return Json(QueryResponse { results: vec![] });
+    };
+
+    let Ok(table) = table_definition.load().await else {
+        return Json(QueryResponse { results: vec![] });
+    };
 
     Json(QueryResponse { results: vec![] })
 }

@@ -3,10 +3,21 @@ const FLOAT_VALUE_SIZE: usize = std::mem::size_of::<f64>();
 // For now, we can store strings up to 256 bytes.
 const STRING_VALUE_SIZE: usize = 256;
 
+#[derive(Debug)]
 pub enum ColumnType {
     Integer,
     Float,
     String,
+}
+
+impl ColumnType {
+    pub const fn size(&self) -> usize {
+        match self {
+            ColumnType::Integer => INTEGER_VALUE_SIZE,
+            ColumnType::Float => FLOAT_VALUE_SIZE,
+            ColumnType::String => STRING_VALUE_SIZE,
+        }
+    }
 }
 
 impl<'a> From<&'a ColumnType> for &'a str {
@@ -19,12 +30,13 @@ impl<'a> From<&'a ColumnType> for &'a str {
     }
 }
 
-impl From<ColumnType> for usize {
-    fn from(value: ColumnType) -> Self {
+impl<'a> From<&'a str> for ColumnType {
+    fn from(value: &'a str) -> Self {
         match value {
-            ColumnType::Integer => INTEGER_VALUE_SIZE,
-            ColumnType::Float => FLOAT_VALUE_SIZE,
-            ColumnType::String => STRING_VALUE_SIZE,
+            "integer" => ColumnType::Integer,
+            "float" => ColumnType::Float,
+            "string" => ColumnType::String,
+            _ => ColumnType::Integer,
         }
     }
 }
