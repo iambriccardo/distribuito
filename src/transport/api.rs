@@ -43,7 +43,7 @@ impl From<ColumnType> for TableColumnType {
 pub struct InsertRequest {
     insert: Vec<String>,
     into: String,
-    values: Vec<Vec<serde_json::Value>>
+    values: Vec<Vec<serde_json::Value>>,
 }
 
 #[derive(Deserialize)]
@@ -89,7 +89,7 @@ pub async fn insert(
     let Ok(table) = table_definition.load().await else {
         return Json("Could not load table".to_string());
     };
-    
+
     Json("test".to_string())
 }
 

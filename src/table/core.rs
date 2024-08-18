@@ -1,6 +1,7 @@
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::u64;
+
 use serde_json::Value;
 use tokio::fs::{create_dir_all, File, read_dir};
 use tokio::io;
@@ -142,7 +143,7 @@ impl TableDefinition {
 #[derive(Debug)]
 pub struct TableStats {
     row_count: u64,
-    next_index: u64
+    next_index: u64,
 }
 
 impl TableStats {
@@ -174,9 +175,16 @@ impl Table {
         &self.definition.name
     }
 
-    pub async fn insert(&self, columns: Vec<String>, values: Vec<Vec<serde_json::Value>>) -> io::Result<()> {
+    pub async fn insert(
+        &self,
+        columns: Vec<String>,
+        values: Vec<Vec<serde_json::Value>>,
+    ) -> io::Result<()> {
         if !self.validate_columns(&columns) {
-            return Err(Error::new(ErrorKind::Unsupported, "The column does not exist"))
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                "The column does not exist",
+            ));
         }
 
         for value in values {
@@ -193,25 +201,30 @@ impl Table {
         match value {
             Value::Number(number) => {
                 if number.is_i64() {
-                    self.write_value(&i64::to_le_bytes(number.as_i64().unwrap())).await?;
+                    self.write_value(&i64::to_le_bytes(number.as_i64().unwrap()))
+                        .await?;
                 } else if number.is_f64() {
-                    self.write_value(&f64::to_le_bytes(number.as_f64().unwrap())).await?;
+                    self.write_value(&f64::to_le_bytes(number.as_f64().unwrap()))
+                        .await?;
                 } else {
-                    return Err(Error::new(ErrorKind::Unsupported, "The number is not supported"))
+                    return Err(Error::new(
+                        ErrorKind::Unsupported,
+                        "The number is not supported",
+                    ));
                 }
-            },
+            }
             Value::String(string) => {
-                self.write_value(&string.as_bytes()[..ColumnType::String.size()]).await?;
-            },
-            _ => {
-                return Err(Error::new(ErrorKind::Unsupported, "Cannot write value"))
-            },
+                self.write_value(&string.as_bytes()[..ColumnType::String.size()])
+                    .await?;
+            }
+            _ => return Err(Error::new(ErrorKind::Unsupported, "Cannot write value")),
         }
 
         Ok(())
     }
 
     async fn write_value(&self, data: &[u8]) -> io::Result<()> {
+        // TODO: before data insert index and timestamp.
         Ok(())
     }
 
