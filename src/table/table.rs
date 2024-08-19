@@ -2,15 +2,17 @@ use std::cmp::min;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::u64;
+
 use log::info;
 use serde_json::Value;
 use tokio::fs::{create_dir_all, File, read_dir};
 use tokio::io;
 
 use crate::dio::file::{create_and_open_file, create_file, seek_or, write, write_end};
-use crate::table::types::ColumnType;
+use crate::table::column::{Column, ColumnType, ColumnValue, get_columns};
+use crate::table::cursor::{ColumnCursor, IndexCursor, Row, RowComponent};
 
 fn add_extension(file_name: &str) -> String {
     format!("{}.dsto", file_name)
@@ -22,75 +24,6 @@ fn build_table_path(table_name: &str) -> io::Result<PathBuf> {
 
     // TODO: we might want to make the path configurable via CLI.
     Ok(home_path.join(format!(".distribuito/{}", table_name)))
-}
-
-async fn get_columns<P: AsRef<Path>>(path: P) -> io::Result<Vec<Column>> {
-    let mut columns = vec![];
-
-    let mut dir = read_dir(path.as_ref()).await?;
-    while let Some(entry) = dir.next_entry().await? {
-        if let Ok(file_type) = entry.file_type().await {
-            if file_type.is_file() {
-                if let Ok(file_name) = entry.file_name().into_string() {
-                    if let Some((column_name, column_type)) = parse_column_file_name(&file_name) {
-                        columns.push(Column::new(column_name, column_type));
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(columns)
-}
-
-fn parse_column_file_name(file_name: &str) -> Option<(String, ColumnType)> {
-    let parts: Vec<&str> = file_name.split('.').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-
-    let column_name = parts[0];
-    let column_type = parts[1];
-    let extension = parts[2];
-
-    // Check that the extension is correct
-    if extension != "dsto" {
-        return None;
-    }
-
-    // Check if column_type is not empty
-    if column_type.is_empty() {
-        return None;
-    }
-
-    // Check if column_name is not empty and contains only alphanumeric characters and underscores
-    if column_name.is_empty() || !column_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-        return None;
-    }
-
-    Some((column_name.to_string(), column_type.into()))
-}
-
-#[derive(Debug, Clone)]
-pub struct Column {
-    name: String,
-    ty: ColumnType,
-}
-
-impl Column {
-    pub fn new(name: String, ty: ColumnType) -> Self {
-        Self { name, ty }
-    }
-}
-
-impl<'a> From<&'a Column> for String {
-    fn from(value: &'a Column) -> Self {
-        format!(
-            "{}.{}",
-            value.name,
-            <&ColumnType as Into<&str>>::into(&value.ty)
-        )
-    }
 }
 
 #[derive(Debug)]
@@ -112,7 +45,7 @@ impl TableDefinition {
             let column_file_name: String = column.into();
             create_file(&add_extension(&column_file_name), &table_path).await?;
         }
-        
+
         info!("Created table {name} with {} columns", columns.len());
 
         Ok(Self { name, columns })
@@ -133,13 +66,16 @@ impl TableDefinition {
         let table_path = build_table_path(&self.name)?;
         create_dir_all(&table_path).await?;
 
-        let index_file = create_and_open_file(".index", &table_path).await?;
-        let stats_file = create_and_open_file(".stats", &table_path).await?;
-        
+        let index_file = create_and_open_file(&add_extension(".index"), &table_path).await?;
+        let stats_file = create_and_open_file(&add_extension(".stats"), &table_path).await?;
+
         info!("Loaded table {} in memory", self.name);
-        
+
         let stats = TableStats::from_file(stats_file).await?;
-        info!("Table stats for {}: rows {}, next index: {}", self.name, stats.row_count, stats.next_index);
+        info!(
+            "Table stats for {}: rows {}, next index: {}",
+            self.name, stats.row_count, stats.next_index
+        );
 
         Ok(Table {
             definition: self,
@@ -212,7 +148,6 @@ impl TableIndex {
 
     pub async fn append(&mut self, timestamp: u64, stats: &TableStats) -> io::Result<()> {
         write_end(&mut self.file, &u64::to_le_bytes(stats.next_index)).await?;
-
         write_end(&mut self.file, &u64::to_le_bytes(timestamp)).await?;
 
         Ok(())
@@ -235,23 +170,8 @@ impl Table {
         columns: Vec<String>,
         values: Vec<Vec<serde_json::Value>>,
     ) -> io::Result<()> {
-        let Some(columns) = self.validate_columns(columns) else {
-            return Err(Error::new(
-                ErrorKind::Unsupported,
-                "One or more columns do not exist on table",
-            ));
-        };
-
-        // We open all columns files since we want to append to each of them.
-        let table_path = build_table_path(&self.definition.name)?;
-        let mut column_files = HashMap::new();
-        for column in columns.iter() {
-            let column_file_name: String = column.into();
-            let column_file =
-                create_and_open_file(&add_extension(&column_file_name), &table_path).await?;
-
-            column_files.insert(column.name.clone(), column_file);
-        }
+        let columns = self.validate_columns(&columns)?;
+        let mut column_files = self.open_column_files(&columns).await?;
 
         // For each value we insert into the file.
         for value in values {
@@ -262,14 +182,82 @@ impl Table {
                 ));
             }
 
-            for (inner_value, column) in value.into_iter().zip(columns.iter()) {
-                if let Some(column_file) = column_files.get_mut(&column.name) {
-                    self.insert_value(column, column_file, inner_value).await?;
-                };
+            for ((inner_value, column), column_file) in value
+                .into_iter()
+                .zip(columns.iter())
+                .zip(column_files.iter_mut())
+            {
+                self.insert_value(column, column_file, inner_value).await?;
             }
         }
 
         Ok(())
+    }
+
+    pub async fn query(&mut self, columns: Vec<String>) -> io::Result<Vec<Row<ColumnValue>>> {
+        let columns = self.validate_columns(&columns)?;
+        let column_files = self.open_column_files(&columns).await?;
+
+        let mut index_cursor = IndexCursor::new(self.index.file.try_clone().await?);
+        let mut column_cursors: Vec<ColumnCursor> = columns
+            .iter()
+            .zip(column_files.into_iter())
+            .map(|(c, f)| ColumnCursor::new(c.clone(), f))
+            .collect();
+
+        let mut rows = vec![];
+        while let Ok(index_row_component) = index_cursor.read::<ColumnValue>().await {
+            let mut row_components: Vec<(Column, ColumnValue)> =
+                Vec::with_capacity(column_cursors.len());
+            for (column_index, column_cursor) in column_cursors.iter_mut().enumerate() {
+                // By default, we assume that the column we are reading is null.
+                row_components.insert(
+                    column_index,
+                    (column_cursor.column.clone(), ColumnValue::Null),
+                );
+
+                // We loop and try to seek through the next column.
+                loop {
+                    let column_row_component = column_cursor.read::<ColumnValue>().await?;
+                    let same_row = column_row_component.same_row(&index_row_component);
+                    let Some(column_value) = column_row_component.value else {
+                        break;
+                    };
+
+                    // - If the values have the same index (aka belong to the same row), we
+                    // advance the cursor and return the read value.
+                    // - If the column has a higher index than the index, we just skip the iteration
+                    // and let the index continue.
+                    // - Otherwise, we just advance the cursor and try to get the next element with
+                    // the same index.
+                    if same_row {
+                        row_components
+                            .insert(column_index, (column_cursor.column.clone(), column_value));
+                        column_cursor.advance();
+                        break;
+                    } else if column_row_component.index_id > index_row_component.index_id {
+                        break;
+                    } else {
+                        column_cursor.advance();
+                    }
+                }
+            }
+
+            // We build the row from all the row components.
+            let row = Row::from_components(
+                index_row_component.index_id,
+                index_row_component.timestamp,
+                row_components,
+            );
+            if let Some(row) = row {
+                rows.push(row);
+            }
+
+            // We move onto the next index.
+            index_cursor.advance();
+        }
+
+        Ok(rows)
     }
 
     async fn insert_value(
@@ -278,7 +266,10 @@ impl Table {
         column_file: &mut File,
         value: serde_json::Value,
     ) -> io::Result<()> {
-        let timestamp = SystemTime::now().elapsed().unwrap().as_secs();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
 
         // We write the data into the index.
         self.index.append(timestamp, &self.stats).await?;
@@ -332,13 +323,18 @@ impl Table {
                     ));
                 }
 
-                let bytes = string.as_bytes();
-                self.write_value(
-                    column_file,
-                    timestamp,
-                    &bytes[..min(bytes.len(), ColumnType::String.size())],
-                )
-                .await?;
+                // We build a string with bytes set to 0 when the string is smaller.
+                let mut bytes = [0u8; ColumnType::String.size()];
+                for (index, byte) in string
+                    .as_bytes()
+                    .iter()
+                    .take(ColumnType::String.size())
+                    .enumerate()
+                {
+                    bytes[index] = *byte;
+                }
+
+                self.write_value(column_file, timestamp, &bytes).await?;
             }
             _ => return Err(Error::new(ErrorKind::Unsupported, "Unsupported value type")),
         }
@@ -362,16 +358,35 @@ impl Table {
         Ok(())
     }
 
-    fn validate_columns(&self, columns: Vec<String>) -> Option<Vec<Column>> {
+    fn validate_columns(&self, columns: &Vec<String>) -> io::Result<Vec<Column>> {
         let mut found_columns = Vec::with_capacity(columns.len());
         for column in columns {
-            let Some(found_column) = self.definition.columns.iter().find(|&c| c.name == column)
+            let Some(found_column) = self.definition.columns.iter().find(|&c| c.name == *column)
             else {
-                return None;
+                return Err(Error::new(
+                    ErrorKind::Unsupported,
+                    "One or more columns do not exist on table",
+                ));
             };
             found_columns.push(found_column.clone());
         }
 
-        Some(found_columns)
+        Ok(found_columns)
+    }
+
+    async fn open_column_files(&self, columns: &Vec<Column>) -> io::Result<Vec<File>> {
+        // We open all columns files since we want to append to each of them.
+        let table_path = build_table_path(&self.definition.name)?;
+
+        let mut column_files = Vec::with_capacity(columns.len());
+        for column in columns {
+            let column_file_name: String = column.into();
+            let column_file =
+                create_and_open_file(&add_extension(&column_file_name), &table_path).await?;
+
+            column_files.push(column_file);
+        }
+
+        Ok(column_files)
     }
 }

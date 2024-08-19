@@ -3,11 +3,12 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::Json;
+use log::info;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::table::core::{Column as TableColumn, Table, TableDefinition};
-use crate::table::types::ColumnType as TableColumnType;
+use crate::table::column::{Column as TableColumn, ColumnType as TableColumnType};
+use crate::table::table::{Table, TableDefinition};
 
 #[derive(Deserialize)]
 pub struct CreateTableRequest {
@@ -102,9 +103,18 @@ pub async fn query(
         return Json(QueryResponse { results: vec![] });
     };
 
-    let Ok(table) = table_definition.load().await else {
+    let Ok(mut table) = table_definition.load().await else {
         return Json(QueryResponse { results: vec![] });
     };
 
-    Json(QueryResponse { results: vec![] })
+    match table.query(request.select).await {
+        Ok(rows) => {
+            println!("ROWS {:?}", rows);
+            Json(QueryResponse { results: vec![] })
+        }
+        Err(error) => {
+            info!("Error while querying table {}: {}", table.name(), error);
+            Json(QueryResponse { results: vec![] })
+        }
+    }
 }
