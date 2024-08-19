@@ -64,6 +64,14 @@ fn to_array(vec: Vec<u8>, array: &mut [u8], length: usize) {
     }
 }
 
+fn until_null_char(array: &[u8]) -> &[u8] {
+    if let Some(index) = array.iter().position(|&b| b == 0) {
+        &array[..index]
+    } else {
+        array
+    }
+}
+
 impl FromDisk for ColumnValue {
     fn from(column_type: ColumnType, data: Vec<u8>) -> ColumnValue {
         match column_type {
@@ -83,7 +91,11 @@ impl FromDisk for ColumnValue {
                 let mut new_data = [0u8; ColumnType::String.size()];
                 to_array(data, &mut new_data, ColumnType::String.size());
 
-                ColumnValue::String(str::from_utf8(&new_data).unwrap().to_string())
+                ColumnValue::String(
+                    str::from_utf8(until_null_char(&new_data))
+                        .unwrap()
+                        .to_string(),
+                )
             }
         }
     }

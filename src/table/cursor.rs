@@ -28,6 +28,14 @@ impl<T: Debug> Row<T> {
             values,
         })
     }
+
+    pub fn columns(&self) -> Vec<Column> {
+        self.values.iter().map(|(c, _)| c.clone()).collect()
+    }
+
+    pub fn values(self) -> Vec<T> {
+        self.values.into_iter().map(|(_, v)| v).collect()
+    }
 }
 
 #[derive(Debug)]

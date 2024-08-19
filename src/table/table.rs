@@ -173,6 +173,11 @@ impl Table {
         let columns = self.validate_columns(&columns)?;
         let mut column_files = self.open_column_files(&columns).await?;
 
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
         // For each value we insert into the file.
         for value in values {
             if value.len() != columns.len() {
@@ -182,13 +187,20 @@ impl Table {
                 ));
             }
 
+            // We add an entry in the index for each set of columns.
+            self.index.append(timestamp, &self.stats).await?;
+
             for ((inner_value, column), column_file) in value
                 .into_iter()
                 .zip(columns.iter())
                 .zip(column_files.iter_mut())
             {
-                self.insert_value(column, column_file, inner_value).await?;
+                self.insert_value(timestamp, column, column_file, inner_value)
+                    .await?;
             }
+
+            // Once insertion has been done, we update the table stats and persist them.
+            self.stats.increment().await?;
         }
 
         Ok(())
@@ -209,12 +221,10 @@ impl Table {
         while let Ok(index_row_component) = index_cursor.read::<ColumnValue>().await {
             let mut row_components: Vec<(Column, ColumnValue)> =
                 Vec::with_capacity(column_cursors.len());
+
             for (column_index, column_cursor) in column_cursors.iter_mut().enumerate() {
                 // By default, we assume that the column we are reading is null.
-                row_components.insert(
-                    column_index,
-                    (column_cursor.column.clone(), ColumnValue::Null),
-                );
+                row_components.push((column_cursor.column.clone(), ColumnValue::Null));
 
                 // We loop and try to seek through the next column.
                 loop {
@@ -231,8 +241,7 @@ impl Table {
                     // - Otherwise, we just advance the cursor and try to get the next element with
                     // the same index.
                     if same_row {
-                        row_components
-                            .insert(column_index, (column_cursor.column.clone(), column_value));
+                        row_components[column_index] = (column_cursor.column.clone(), column_value);
                         column_cursor.advance();
                         break;
                     } else if column_row_component.index_id > index_row_component.index_id {
@@ -262,18 +271,11 @@ impl Table {
 
     async fn insert_value(
         &mut self,
+        timestamp: u64,
         column: &Column,
         column_file: &mut File,
         value: serde_json::Value,
     ) -> io::Result<()> {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        // We write the data into the index.
-        self.index.append(timestamp, &self.stats).await?;
-
         // We write the data into the specific column.
         match value {
             Value::Number(number) => {
@@ -338,9 +340,6 @@ impl Table {
             }
             _ => return Err(Error::new(ErrorKind::Unsupported, "Unsupported value type")),
         }
-
-        // Once insertion has been done, we update the table stats and persist them.
-        self.stats.increment().await?;
 
         Ok(())
     }
