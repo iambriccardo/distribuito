@@ -3,7 +3,7 @@ const FLOAT_VALUE_SIZE: usize = std::mem::size_of::<f64>();
 // For now, we can store strings up to 256 bytes.
 const STRING_VALUE_SIZE: usize = 256;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ColumnType {
     Integer,
     Float,

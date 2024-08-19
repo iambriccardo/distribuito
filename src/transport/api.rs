@@ -63,7 +63,7 @@ pub struct AppState {
 }
 
 pub async fn create_table(
-    State(state): State<AppState>,
+    State(_): State<AppState>,
     Json(request): Json<CreateTableRequest>,
 ) -> Json<String> {
     let columns = request
@@ -78,23 +78,24 @@ pub async fn create_table(
     }
 }
 
-pub async fn insert(
-    State(state): State<AppState>,
-    Json(request): Json<InsertRequest>,
-) -> Json<String> {
+pub async fn insert(State(_): State<AppState>, Json(request): Json<InsertRequest>) -> Json<String> {
     let Ok(table_definition) = TableDefinition::open(request.into).await else {
         return Json("Could not open table".to_string());
     };
 
-    let Ok(table) = table_definition.load().await else {
+    let Ok(mut table) = table_definition.load().await else {
         return Json("Could not load table".to_string());
     };
 
-    Json("test".to_string())
+    if let Err(error) = table.insert(request.insert, request.values).await {
+        return Json(format!("Could not write into the table: {}", error));
+    };
+
+    Json("Data inserted successfully".to_string())
 }
 
 pub async fn query(
-    State(state): State<AppState>,
+    State(_): State<AppState>,
     Json(request): Json<QueryRequest>,
 ) -> Json<QueryResponse> {
     let Ok(table_definition) = TableDefinition::open(request.from).await else {
