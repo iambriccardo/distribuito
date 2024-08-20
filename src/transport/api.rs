@@ -88,11 +88,14 @@ pub struct InsertRequest {
 pub struct QueryRequest {
     select: Vec<String>,
     from: String,
+    #[serde(default)]
+    group_by: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
 pub struct Aggregate {
     value: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
     components: Option<Vec<serde_json::Value>>,
 }
 
@@ -125,6 +128,11 @@ pub struct AppState {
     pub open_tables: Arc<Mutex<HashMap<String, Table>>>,
 }
 
+// TODO:
+// Sharded impl:
+// - query -> fans out the query to x nodes and builds QueryResult from the responses
+//            the query result is then merged into the table that was loaded locally.
+// - insert -> fans out the insert based on the statically configured partitioning.
 pub async fn create_table(
     State(_): State<AppState>,
     Json(request): Json<CreateTableRequest>,
@@ -179,7 +187,7 @@ pub async fn query(
         return Json(QueryResponse::empty());
     };
 
-    match table.query(request.select).await {
+    match table.query(request.select, request.group_by).await {
         Ok(query_result) => Json(serialize_query_result(query_result)),
         Err(error) => {
             info!("Error while querying table {}: {}", table.name(), error);

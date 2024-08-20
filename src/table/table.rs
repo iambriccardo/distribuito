@@ -211,9 +211,18 @@ impl Table {
         Ok(())
     }
 
-    pub async fn query(&mut self, columns: Vec<String>) -> io::Result<QueryResult> {
+    pub async fn query(
+        &mut self,
+        columns: Vec<String>,
+        group_by_columns: Option<Vec<String>>,
+    ) -> io::Result<QueryResult> {
         let (columns, aggregate_columns) =
             parse_and_validate_queried_columns(&self.definition.columns, &columns)?;
+        let group_by_columns = parse_and_validate_columns(
+            &self.definition.columns,
+            &group_by_columns.unwrap_or(vec![]),
+        )?;
+        // TODO: add group by validation to make sure that the selected and grouped columns are the same.
         let column_files = self.open_column_files(&columns).await?;
 
         // We query the rows and early return in case no aggregates are supplied.
@@ -223,7 +232,7 @@ impl Table {
         }
 
         // If aggregates are supplied, we will perform grouping in memory.
-        let aggregated_rows = self.aggregate_rows(rows, aggregate_columns)?;
+        let aggregated_rows = self.aggregate_rows(rows, aggregate_columns, group_by_columns)?;
 
         Ok(QueryResult::AggregatedRows(aggregated_rows))
     }
@@ -296,11 +305,12 @@ impl Table {
         &mut self,
         rows: Vec<Row<ColumnValue>>,
         aggregate_columns: Vec<AggregateColumn>,
+        group_by_columns: Vec<Column>,
     ) -> io::Result<Vec<AggregatedRow<ColumnValue>>> {
         let mut groups = HashMap::new();
         for row in rows {
             // TODO: for now we group by each individual column, but we will add.
-            let group_key = row.group();
+            let group_key = row.group(&group_by_columns);
             let group_value = groups
                 .entry(group_key)
                 .or_insert_with(|| GroupValue::<ColumnValue>::new(aggregate_columns.clone()));

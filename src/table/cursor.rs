@@ -111,8 +111,17 @@ where
         self.values.iter().map(|(c, _)| c.clone()).collect()
     }
 
-    pub fn group(&self) -> GroupKey<T> {
-        let key = self.values.iter().map(|v| v.clone()).collect();
+    pub fn group(&self, group_by_columns: &Vec<Column>) -> GroupKey<T> {
+        let key = self
+            .values
+            .iter()
+            .filter_map(|(c, v)| {
+                group_by_columns
+                    .into_iter()
+                    .find(|inner_c| **inner_c == *c)?;
+                Some((c.clone(), v.clone()))
+            })
+            .collect();
 
         GroupKey(key)
     }
