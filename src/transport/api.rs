@@ -1,16 +1,18 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::Json;
 use log::info;
 use serde::{Deserialize, Serialize};
 use serde_json::Number;
 use tokio::sync::Mutex;
 
-use crate::table::column::{Column as TableColumn, ColumnType as TableColumnType, ColumnValue};
-use crate::table::cursor::Row;
-use crate::table::table::{Table, TableDefinition};
+use crate::table::column::{
+    AggregateColumn, Column as TableColumn, ColumnType as TableColumnType, ColumnValue,
+};
+use crate::table::cursor::{AggregatedRow, Row};
+use crate::table::table::{QueryResult, Table, TableDefinition};
 
 #[derive(Deserialize)]
 pub struct CreateTableRequest {
@@ -24,12 +26,22 @@ pub struct Column {
     ty: ColumnType,
 }
 
+impl From<TableColumn> for Column {
+    fn from(value: TableColumn) -> Self {
+        Self {
+            name: value.name,
+            ty: value.ty.into(),
+        }
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ColumnType {
     Integer,
     Float,
     String,
+    Null,
 }
 
 impl From<ColumnType> for TableColumnType {
@@ -38,6 +50,7 @@ impl From<ColumnType> for TableColumnType {
             ColumnType::Integer => TableColumnType::Integer,
             ColumnType::Float => TableColumnType::Float,
             ColumnType::String => TableColumnType::String,
+            ColumnType::Null => TableColumnType::Null,
         }
     }
 }
@@ -48,6 +61,18 @@ impl From<TableColumnType> for ColumnType {
             TableColumnType::Integer => ColumnType::Integer,
             TableColumnType::Float => ColumnType::Float,
             TableColumnType::String => ColumnType::String,
+            TableColumnType::Null => panic!("Invalid column type"),
+        }
+    }
+}
+
+impl<'a> From<&'a ColumnValue> for ColumnType {
+    fn from(value: &'a ColumnValue) -> Self {
+        match value {
+            ColumnValue::Integer(_) => ColumnType::Integer,
+            ColumnValue::Float(_) => ColumnType::Float,
+            ColumnValue::String(_) => ColumnType::String,
+            ColumnValue::Null => ColumnType::Null,
         }
     }
 }
@@ -66,6 +91,12 @@ pub struct QueryRequest {
 }
 
 #[derive(Serialize)]
+pub struct Aggregate {
+    value: serde_json::Value,
+    components: Option<Vec<serde_json::Value>>,
+}
+
+#[derive(Serialize)]
 #[serde(untagged)]
 pub enum QueryResponse {
     Empty {
@@ -74,6 +105,12 @@ pub enum QueryResponse {
     WithData {
         columns: Vec<Column>,
         data: Vec<Vec<serde_json::Value>>,
+    },
+    WithAggregatedData {
+        columns: Vec<Column>,
+        aggregate_columns: Vec<Column>,
+        data: Vec<Vec<serde_json::Value>>,
+        aggregates: Vec<Vec<Aggregate>>,
     },
 }
 
@@ -143,7 +180,7 @@ pub async fn query(
     };
 
     match table.query(request.select).await {
-        Ok(rows) => Json(rows_to_response(rows)),
+        Ok(query_result) => Json(serialize_query_result(query_result)),
         Err(error) => {
             info!("Error while querying table {}: {}", table.name(), error);
             Json(QueryResponse::empty())
@@ -151,46 +188,98 @@ pub async fn query(
     }
 }
 
-fn rows_to_response(rows: Vec<Row<ColumnValue>>) -> QueryResponse {
-    if rows.is_empty() {
+fn serialize_query_result(query_result: QueryResult) -> QueryResponse {
+    if query_result.is_empty() {
         return QueryResponse::empty();
     }
 
-    let columns = rows[0]
-        .columns()
-        .iter()
-        .map(|c| Column {
-            name: c.name.clone(),
-            ty: c.ty.into(),
-        })
-        .collect();
-
-    QueryResponse::WithData {
-        columns,
-        data: serialize_data(rows),
+    match query_result {
+        QueryResult::Rows(rows) => serialize_rows(rows),
+        QueryResult::AggregatedRows(aggregated_rows) => serialize_aggregated_rows(aggregated_rows),
     }
 }
 
-fn serialize_data(rows: Vec<Row<ColumnValue>>) -> Vec<Vec<serde_json::Value>> {
-    let mut serialized_rows = Vec::with_capacity(rows.len());
+fn serialize_rows(rows: Vec<Row<ColumnValue>>) -> QueryResponse {
+    let columns = rows[0].columns().into_iter().map(|c| c.into()).collect();
+
+    QueryResponse::WithData {
+        columns,
+        data: serialize_rows_data(rows),
+    }
+}
+
+fn serialize_aggregated_rows(aggregated_rows: Vec<AggregatedRow<ColumnValue>>) -> QueryResponse {
+    let first_row = &aggregated_rows[0];
+    let columns = first_row.columns().into_iter().map(|c| c.into()).collect();
+    let aggregate_columns = first_row
+        .aggregate_columns()
+        .into_iter()
+        .map(|(a, c)| Column {
+            name: a.into(),
+            ty: c.into(),
+        })
+        .collect();
+
+    let (data, aggregates) = serialize_aggregated_rows_data(aggregated_rows);
+    QueryResponse::WithAggregatedData {
+        columns,
+        aggregate_columns,
+        data,
+        aggregates,
+    }
+}
+
+fn serialize_rows_data(rows: Vec<Row<ColumnValue>>) -> Vec<Vec<serde_json::Value>> {
+    let mut serialized_data = Vec::with_capacity(rows.len());
     for row in rows {
         let values = row.into_values();
+
         let mut serialized_values = Vec::with_capacity(values.len());
         for value in values {
-            let serialized_value = match value {
-                ColumnValue::Integer(value) => serde_json::Value::Number(Number::from(value)),
-                ColumnValue::Float(value) => {
-                    serde_json::Value::Number(Number::from_f64(value).unwrap())
-                }
-                ColumnValue::String(value) => serde_json::Value::String(value),
-                ColumnValue::Null => serde_json::Value::Null,
-            };
-
-            serialized_values.push(serialized_value);
+            serialized_values.push(serialize_column_value(value));
         }
 
-        serialized_rows.push(serialized_values);
+        serialized_data.push(serialized_values);
     }
 
-    serialized_rows
+    serialized_data
+}
+
+fn serialize_aggregated_rows_data(
+    aggregated_rows: Vec<AggregatedRow<ColumnValue>>,
+) -> (Vec<Vec<serde_json::Value>>, Vec<Vec<Aggregate>>) {
+    let mut serialized_data = Vec::with_capacity(aggregated_rows.len());
+    let mut serialized_aggregates = Vec::with_capacity(aggregated_rows.len());
+
+    for aggregated_row in aggregated_rows {
+        let (values, aggregate_values) = aggregated_row.into_values();
+
+        let mut serialized_values = Vec::with_capacity(values.len());
+        for value in values {
+            serialized_values.push(serialize_column_value(value));
+        }
+        serialized_data.push(serialized_values);
+
+        let mut serialized_aggregate_values = Vec::with_capacity(aggregate_values.len());
+        for (aggregate_value, aggregate_components) in aggregate_values {
+            let serialized_aggregate = Aggregate {
+                value: serialize_column_value(aggregate_value),
+                components: aggregate_components
+                    .map(|a| a.into_iter().map(|v| serialize_column_value(v)).collect()),
+            };
+            serialized_aggregate_values.push(serialized_aggregate);
+        }
+        serialized_aggregates.push(serialized_aggregate_values);
+    }
+
+    (serialized_data, serialized_aggregates)
+}
+
+fn serialize_column_value(column_value: ColumnValue) -> serde_json::Value {
+    match column_value {
+        ColumnValue::Integer(value) => serde_json::Value::Number(Number::from(value)),
+        ColumnValue::Float(value) => serde_json::Value::Number(Number::from_f64(value).unwrap()),
+        ColumnValue::String(value) => serde_json::Value::String(value),
+        ColumnValue::Null => serde_json::Value::Null,
+    }
 }

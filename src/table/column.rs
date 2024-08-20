@@ -16,12 +16,14 @@ const INTEGER_VALUE_SIZE: usize = std::mem::size_of::<i64>();
 const FLOAT_VALUE_SIZE: usize = std::mem::size_of::<f64>();
 // For now, we can store strings up to 256 bytes.
 const STRING_VALUE_SIZE: usize = 256;
+const NULL_VALUE_SIZE: usize = 0;
 
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub enum ColumnType {
     Integer,
     Float,
     String,
+    Null,
 }
 
 impl ColumnType {
@@ -30,6 +32,7 @@ impl ColumnType {
             ColumnType::Integer => INTEGER_VALUE_SIZE,
             ColumnType::Float => FLOAT_VALUE_SIZE,
             ColumnType::String => STRING_VALUE_SIZE,
+            ColumnType::Null => NULL_VALUE_SIZE,
         }
     }
 }
@@ -40,6 +43,7 @@ impl<'a> From<&'a ColumnType> for &'a str {
             ColumnType::Integer => "integer",
             ColumnType::Float => "float",
             ColumnType::String => "string",
+            ColumnType::Null => "null",
         }
     }
 }
@@ -50,7 +54,7 @@ impl<'a> From<&'a str> for ColumnType {
             "integer" => ColumnType::Integer,
             "float" => ColumnType::Float,
             "string" => ColumnType::String,
-            _ => ColumnType::Integer,
+            _ => panic!("Invalid column type"),
         }
     }
 }
@@ -83,6 +87,7 @@ impl From<ColumnType> for ColumnValue {
             ColumnType::Integer => ColumnValue::default_integer(),
             ColumnType::Float => ColumnValue::default_float(),
             ColumnType::String => ColumnValue::default_string(),
+            ColumnType::Null => ColumnValue::Null,
         }
     }
 }
@@ -249,6 +254,7 @@ impl FromDisk for ColumnValue {
                         .to_string(),
                 )
             }
+            ColumnType::Null => ColumnValue::Null,
         }
     }
 }
@@ -281,6 +287,13 @@ impl<'a> From<&'a Column> for String {
 
 #[derive(Debug, Clone)]
 pub struct AggregateColumn(pub Aggregate, pub Column);
+
+impl From<AggregateColumn> for String {
+    fn from(value: AggregateColumn) -> Self {
+        let aggregate: &str = value.0.into();
+        format!("{}({})", aggregate, value.1.name)
+    }
+}
 
 pub type QueriedColumns = (Vec<Column>, Vec<AggregateColumn>);
 

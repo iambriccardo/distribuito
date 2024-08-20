@@ -36,6 +36,30 @@ where
                 .collect(),
         }
     }
+
+    pub fn into_values(self) -> (Vec<T>, Vec<(T, Option<Vec<T>>)>) {
+        let values = self.values.into_iter().map(|(_, v)| v).collect();
+        let aggregates = self
+            .aggregates
+            .into_iter()
+            .map(|(_, v, c)| (v, c))
+            .collect();
+
+        (values, aggregates)
+    }
+
+    pub fn columns(&self) -> Vec<Column> {
+        self.values.iter().map(|(c, _)| c.clone()).collect()
+    }
+
+    pub fn aggregate_columns(&self) -> Vec<(AggregateColumn, &T)> {
+        // We have to return `&T` since we will use that to infer the type of the aggregate, which
+        // can differ from the type of the `column` on which it is run.
+        self.aggregates
+            .iter()
+            .map(|(c, v, _)| (c.clone(), v))
+            .collect()
+    }
 }
 
 #[derive(Debug)]

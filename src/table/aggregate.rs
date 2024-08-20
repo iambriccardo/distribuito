@@ -24,6 +24,23 @@ impl<'a> From<&'a str> for Aggregate {
     }
 }
 
+impl<'a> From<Aggregate> for &'a str {
+    fn from(value: Aggregate) -> Self {
+        match value {
+            Aggregate::Count => "count",
+            Aggregate::Sum => "sum",
+            Aggregate::Avg => "avg",
+        }
+    }
+}
+
+/// Enumerator representing the merging operation to do between aggregate components.
+#[derive(Debug, Clone)]
+pub enum MergeOp {
+    Count,
+    Sum,
+}
+
 #[derive(Debug)]
 pub enum AggregateComponents<T>
 where
@@ -51,11 +68,11 @@ where
 
     pub fn aggregate(&mut self, value: &T) {
         match self {
-            AggregateComponents::Count(count) => count.aggregate(&Aggregate::Count, value.clone()),
-            AggregateComponents::Sum(sum) => sum.aggregate(&Aggregate::Sum, value.clone()),
+            AggregateComponents::Count(count) => count.merge(MergeOp::Count, value.clone()),
+            AggregateComponents::Sum(sum) => sum.merge(MergeOp::Sum, value.clone()),
             AggregateComponents::Avg { sum, count } => {
-                sum.aggregate(&Aggregate::Sum, value.clone());
-                count.aggregate(&Aggregate::Count, value.clone());
+                sum.merge(MergeOp::Sum, value.clone());
+                count.merge(MergeOp::Count, value.clone());
             }
         }
     }
@@ -100,7 +117,7 @@ where
         }
     }
 
-    pub fn Div(&mut self, row: Row<T>) {
+    pub fn add(&mut self, row: Row<T>) {
         for (aggregate_column, aggregate_components) in self.aggregates.iter_mut() {
             if let Some(value) = row.value(&aggregate_column.1) {
                 aggregate_components.aggregate(value);
@@ -112,7 +129,7 @@ where
 pub trait Aggregable<T> {
     fn init(aggregate_column: &AggregateColumn) -> T;
 
-    fn aggregate(&mut self, aggregate: &Aggregate, other: T);
+    fn merge(&mut self, aggregate_op: MergeOp, other: T);
 }
 
 impl Aggregable<ColumnValue> for ColumnValue {
@@ -124,12 +141,11 @@ impl Aggregable<ColumnValue> for ColumnValue {
         }
     }
 
-    fn aggregate(&mut self, aggregate: &Aggregate, other: ColumnValue) {
+    fn merge(&mut self, merge_op: MergeOp, other: ColumnValue) {
         // TODO: maybe instead of &mut we want to consume the value and return a new one.
-        *self = match aggregate {
-            Aggregate::Count => self.clone() + ColumnValue::Integer(1),
-            Aggregate::Sum => self.clone() + other,
-            Aggregate::Avg => (self.clone() + other) / ColumnValue::Integer(2),
+        *self = match merge_op {
+            MergeOp::Count => self.clone() + ColumnValue::Integer(1),
+            MergeOp::Sum => self.clone() + other,
         }
     }
 }

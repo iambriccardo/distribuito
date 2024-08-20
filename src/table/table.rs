@@ -12,10 +12,10 @@ use tokio::fs::{create_dir_all, File, read_dir};
 use tokio::io;
 
 use crate::dio::file::{create_and_open_file, create_file, seek_or, write, write_end};
-use crate::table::aggregate::{Aggregate, GroupValue};
+use crate::table::aggregate::{Aggregable, Aggregate, GroupValue};
 use crate::table::column::{
-    Column, ColumnType, ColumnValue, get_columns,
-    parse_and_validate_columns, parse_and_validate_queried_columns,
+    AggregateColumn, Column, ColumnType, ColumnValue,
+    get_columns, parse_and_validate_columns, parse_and_validate_queried_columns,
 };
 use crate::table::cursor::{AggregatedRow, ColumnCursor, IndexCursor, Row, RowComponent};
 
@@ -211,32 +211,21 @@ impl Table {
         Ok(())
     }
 
-    pub async fn query(&mut self, columns: Vec<String>) -> io::Result<Vec<Row<ColumnValue>>> {
+    pub async fn query(&mut self, columns: Vec<String>) -> io::Result<QueryResult> {
         let (columns, aggregate_columns) =
             parse_and_validate_queried_columns(&self.definition.columns, &columns)?;
         let column_files = self.open_column_files(&columns).await?;
 
+        // We query the rows and early return in case no aggregates are supplied.
         let rows = self.query_values(&columns, column_files).await?;
         if aggregate_columns.is_empty() {
-            return Ok(rows);
+            return Ok(QueryResult::Rows(rows));
         }
 
-        let mut groups = HashMap::new();
-        for row in rows {
-            // TODO: for now we group by each individual column, but we will add.
-            let group_key = row.group();
-            let group_value = groups
-                .entry(group_key)
-                .or_insert_with(|| GroupValue::<ColumnValue>::new(aggregate_columns.clone()));
-            group_value.add(row);
-        }
+        // If aggregates are supplied, we will perform grouping in memory.
+        let aggregated_rows = self.aggregate_rows(rows, aggregate_columns)?;
 
-        let mut aggregated_rows = vec![];
-        for (group_key, group_value) in groups {
-            AggregatedRow::from_group(group_key)
-        }
-
-        Ok(vec![])
+        Ok(QueryResult::AggregatedRows(aggregated_rows))
     }
 
     async fn query_values(
@@ -301,6 +290,30 @@ impl Table {
         }
 
         Ok(rows)
+    }
+
+    fn aggregate_rows(
+        &mut self,
+        rows: Vec<Row<ColumnValue>>,
+        aggregate_columns: Vec<AggregateColumn>,
+    ) -> io::Result<Vec<AggregatedRow<ColumnValue>>> {
+        let mut groups = HashMap::new();
+        for row in rows {
+            // TODO: for now we group by each individual column, but we will add.
+            let group_key = row.group();
+            let group_value = groups
+                .entry(group_key)
+                .or_insert_with(|| GroupValue::<ColumnValue>::new(aggregate_columns.clone()));
+            group_value.add(row);
+        }
+
+        let mut aggregated_rows = vec![];
+        for (group_key, group_value) in groups {
+            // TODO: return columns ordered in the order in which they were supplied.
+            aggregated_rows.push(AggregatedRow::from_group(group_key, group_value));
+        }
+
+        Ok(aggregated_rows)
     }
 
     async fn insert_value(
@@ -405,5 +418,20 @@ impl Table {
         }
 
         Ok(column_files)
+    }
+}
+
+#[derive(Debug)]
+pub enum QueryResult {
+    Rows(Vec<Row<ColumnValue>>),
+    AggregatedRows(Vec<AggregatedRow<ColumnValue>>),
+}
+
+impl QueryResult {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            QueryResult::Rows(rows) => rows.is_empty(),
+            QueryResult::AggregatedRows(aggregated_rows) => aggregated_rows.is_empty(),
+        }
     }
 }
