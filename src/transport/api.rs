@@ -1,16 +1,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::Json;
 use log::info;
 use serde::{Deserialize, Serialize};
 use serde_json::Number;
 use tokio::sync::Mutex;
 
-use crate::table::column::{
-    AggregateColumn, Column as TableColumn, ColumnType as TableColumnType, ColumnValue,
-};
+use crate::table::column::{Column as TableColumn, ColumnType as TableColumnType, ColumnValue};
 use crate::table::cursor::{AggregatedRow, Row};
 use crate::table::table::{QueryResult, Table, TableDefinition};
 

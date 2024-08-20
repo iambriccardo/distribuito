@@ -119,6 +119,7 @@ where
 
     pub fn add(&mut self, row: Row<T>) {
         for (aggregate_column, aggregate_components) in self.aggregates.iter_mut() {
+            // TODO: take value out of the array instead of cloning.
             if let Some(value) = row.value(&aggregate_column.1) {
                 aggregate_components.aggregate(value);
             }

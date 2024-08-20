@@ -361,6 +361,9 @@ pub fn parse_and_validate_queried_columns(
         let found_column = get_column(available_columns, column)?;
         match aggregate {
             Some(aggregate) => {
+                // We add the aggregate column in the columns too since we want to open the files
+                // of the aggregated columns too.
+                parsed_columns.push(found_column.clone());
                 parsed_aggregate_columns.push(AggregateColumn(aggregate, found_column))
             }
             None => parsed_columns.push(found_column),

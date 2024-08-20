@@ -1,23 +1,21 @@
-use std::cmp::min;
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::u64;
 
 use log::info;
 use serde_json::Value;
-use tokio::fs::{create_dir_all, File, read_dir};
+use tokio::fs::{create_dir_all, File};
 use tokio::io;
 
 use crate::dio::file::{create_and_open_file, create_file, seek_or, write, write_end};
-use crate::table::aggregate::{Aggregable, Aggregate, GroupValue};
+use crate::table::aggregate::GroupValue;
 use crate::table::column::{
     AggregateColumn, Column, ColumnType, ColumnValue,
     get_columns, parse_and_validate_columns, parse_and_validate_queried_columns,
 };
-use crate::table::cursor::{AggregatedRow, ColumnCursor, IndexCursor, Row, RowComponent};
+use crate::table::cursor::{AggregatedRow, ColumnCursor, IndexCursor, Row};
 
 fn add_extension(file_name: &str) -> String {
     format!("{}.dsto", file_name)
@@ -216,6 +214,7 @@ impl Table {
         columns: Vec<String>,
         group_by_columns: Option<Vec<String>>,
     ) -> io::Result<QueryResult> {
+        // TODO: implement proper column deduplication via hash sets.
         let (columns, aggregate_columns) =
             parse_and_validate_queried_columns(&self.definition.columns, &columns)?;
         let group_by_columns = parse_and_validate_columns(
@@ -418,7 +417,7 @@ impl Table {
         // We open all columns files since we want to append to each of them.
         let table_path = build_table_path(&self.definition.name)?;
 
-        let mut column_files = Vec::with_capacity(columns.len());
+        let mut column_files = vec![];
         for column in columns {
             let column_file_name: String = column.into();
             let column_file =
