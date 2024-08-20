@@ -7,9 +7,15 @@ use tokio::io;
 use crate::io::file::create_file;
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct Instance {
+    pub ip_port: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub database_name: String,
     pub database_path: String,
+    pub instances: Vec<Instance>
 }
 
 impl Config {

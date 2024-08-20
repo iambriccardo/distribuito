@@ -1,5 +1,9 @@
 # Distribuito
 
+![Distribuito logo](./logo.png)
+
+## Introduction
+
 Distribuito is a column-oriented distributed database inspired by the Retriever database 
 (https://www.youtube.com/watch?v=EMFKVimuyhQ) developed by Honeycomb. I decided to create Distribuito during Sentry's 
 internal hackweek, a week-long hackathon where Sentry employees can work on whatever they want.
