@@ -9,7 +9,13 @@ Distribuito is a column-oriented distributed database inspired by the Retriever 
 internal hackweek, a week-long hackathon where Sentry employees can work on whatever they want.
 
 This project is intended to be a playground for me to learn about database design and implementation. Currently, the 
-implementation lacks many features that I might add in the future.
+implementation lacks many features:
+- The distributed query execution engine.
+- All the transport layer between shards.
+- Ability to filter by predicates.
+- Ability to order by.
+
+I hope to be able to finish all the distributed query execution to make the project presentable.
 
 ## Features
 
