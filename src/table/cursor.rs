@@ -1,51 +1,113 @@
 use std::fmt::Debug;
+use std::hash::Hash;
+use std::ops::Div;
 
 use tokio::fs::File;
 use tokio::io;
 
 use crate::dio::file::seek;
-use crate::table::column::{Column, ColumnType, index_and_timestamp_size};
+use crate::table::aggregate::{Aggregable, GroupKey, GroupValue};
+use crate::table::column::{AggregateColumn, Column, ColumnType, index_and_timestamp_size};
 use crate::table::FromDisk;
 
 #[derive(Debug)]
-pub struct Row<T: Debug> {
+pub struct AggregatedRow<T>
+where
+    T: Aggregable<T> + Div<Output = T> + Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
+{
+    values: Vec<(Column, T)>,
+    aggregates: Vec<(AggregateColumn, T, Option<Vec<T>>)>,
+}
+
+impl<T> AggregatedRow<T>
+where
+    T: Aggregable<T> + Div<Output = T> + Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
+{
+    pub fn from_group(group_key: GroupKey<T>, group_value: GroupValue<T>) -> Self {
+        Self {
+            values: group_key.0.into_iter().collect(),
+            aggregates: group_value
+                .aggregates
+                .into_iter()
+                .map(|(aggregate_column, aggregate_components)| {
+                    let (aggregate_value, aggregate_components) = aggregate_components.compute();
+                    (aggregate_column, aggregate_value, aggregate_components)
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Row<T>
+where
+    T: Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
+{
     index_id: u64,
     timestamp: u64,
     values: Vec<(Column, T)>,
 }
 
-impl<T: Debug> Row<T> {
+impl<T> Row<T>
+where
+    T: Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
+{
     pub fn from_components(
         index_id: u64,
         timestamp: u64,
         row_components: impl IntoIterator<Item = (Column, T)>,
     ) -> Option<Self> {
-        let values = row_components.into_iter().collect();
-
         Some(Self {
             index_id,
             timestamp,
-            values,
+            values: row_components.into_iter().collect(),
         })
+    }
+
+    pub fn into_values(self) -> Vec<T> {
+        self.values.into_iter().map(|(_, v)| v).collect()
+    }
+
+    pub fn value(&self, column: &Column) -> Option<&T> {
+        self.values
+            .iter()
+            .find(|(c, _)| c == column)
+            .map(|(_, v)| v)
+    }
+
+    pub fn take_value(&mut self, column: &Column) -> Option<T> {
+        if let Some(pos) = self.values.iter().position(|(c, _)| c == column) {
+            Some(self.values.remove(pos).1)
+        } else {
+            None
+        }
     }
 
     pub fn columns(&self) -> Vec<Column> {
         self.values.iter().map(|(c, _)| c.clone()).collect()
     }
 
-    pub fn values(self) -> Vec<T> {
-        self.values.into_iter().map(|(_, v)| v).collect()
+    pub fn group(&self) -> GroupKey<T> {
+        let key = self.values.iter().map(|v| v.clone()).collect();
+
+        GroupKey(key)
     }
 }
 
 #[derive(Debug)]
-pub struct RowComponent<T> {
+pub struct RowComponent<T>
+where
+    T: Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
+{
     pub index_id: u64,
     pub timestamp: u64,
     pub value: Option<T>,
 }
 
-impl<T> RowComponent<T> {
+impl<T> RowComponent<T>
+where
+    T: Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
+{
     pub fn new(index_id: u64, timestamp: u64, value: Option<T>) -> Self {
         Self {
             index_id,
@@ -82,7 +144,10 @@ impl ColumnCursor {
         }
     }
 
-    pub async fn read<T: FromDisk + Debug>(&mut self) -> io::Result<RowComponent<T>> {
+    pub async fn read<T>(&mut self) -> io::Result<RowComponent<T>>
+    where
+        T: FromDisk + Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
+    {
         let mut index_id = [0u8; ColumnType::Integer.size()];
         let position = self.seek_position();
         seek(&mut self.file, position, &mut index_id).await?;
@@ -129,7 +194,10 @@ impl IndexCursor {
         }
     }
 
-    pub async fn read<T: FromDisk>(&mut self) -> io::Result<RowComponent<T>> {
+    pub async fn read<T>(&mut self) -> io::Result<RowComponent<T>>
+    where
+        T: FromDisk + Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
+    {
         let mut index_id = [0u8; ColumnType::Integer.size()];
         let position = self.seek_position();
         seek(&mut self.file, position, &mut index_id).await?;

@@ -174,7 +174,7 @@ fn rows_to_response(rows: Vec<Row<ColumnValue>>) -> QueryResponse {
 fn serialize_data(rows: Vec<Row<ColumnValue>>) -> Vec<Vec<serde_json::Value>> {
     let mut serialized_rows = Vec::with_capacity(rows.len());
     for row in rows {
-        let values = row.values();
+        let values = row.into_values();
         let mut serialized_values = Vec::with_capacity(values.len());
         for value in values {
             let serialized_value = match value {

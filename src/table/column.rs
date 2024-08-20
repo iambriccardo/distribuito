@@ -1,10 +1,15 @@
+use std::cmp::Ordering;
 use std::f64;
+use std::hash::{Hash, Hasher};
+use std::io::{Error, ErrorKind};
+use std::ops::{Add, AddAssign, Div, Mul};
 use std::path::Path;
 use std::str;
 
 use tokio::fs::read_dir;
 use tokio::io;
 
+use crate::table::aggregate::Aggregate;
 use crate::table::FromDisk;
 
 const INTEGER_VALUE_SIZE: usize = std::mem::size_of::<i64>();
@@ -56,6 +61,153 @@ pub enum ColumnValue {
     Float(f64),
     String(String),
     Null,
+}
+
+impl ColumnValue {
+    pub fn default_integer() -> ColumnValue {
+        ColumnValue::Integer(0)
+    }
+
+    pub fn default_float() -> ColumnValue {
+        ColumnValue::Float(0.0)
+    }
+
+    pub fn default_string() -> ColumnValue {
+        ColumnValue::String("".to_string())
+    }
+}
+
+impl From<ColumnType> for ColumnValue {
+    fn from(value: ColumnType) -> Self {
+        match value {
+            ColumnType::Integer => ColumnValue::default_integer(),
+            ColumnType::Float => ColumnValue::default_float(),
+            ColumnType::String => ColumnValue::default_string(),
+        }
+    }
+}
+
+impl PartialEq for ColumnValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (ColumnValue::Integer(a), ColumnValue::Integer(b)) => a == b,
+            (ColumnValue::Float(a), ColumnValue::Float(b)) => a.to_bits() == b.to_bits(),
+            (ColumnValue::String(a), ColumnValue::String(b)) => a == b,
+            (ColumnValue::Null, ColumnValue::Null) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for ColumnValue {}
+
+impl PartialOrd for ColumnValue {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match (self, other) {
+            (ColumnValue::Integer(a), ColumnValue::Integer(b)) => a.partial_cmp(b),
+            (ColumnValue::Float(a), ColumnValue::Float(b)) => a.partial_cmp(b),
+            (ColumnValue::String(a), ColumnValue::String(b)) => a.partial_cmp(b),
+            (ColumnValue::Null, ColumnValue::Null) => Some(Ordering::Equal),
+            (ColumnValue::Integer(_), _) => Some(Ordering::Less),
+            (_, ColumnValue::Integer(_)) => Some(Ordering::Greater),
+            (ColumnValue::Float(_), _) => Some(Ordering::Less),
+            (_, ColumnValue::Float(_)) => Some(Ordering::Greater),
+            (ColumnValue::String(_), _) => Some(Ordering::Less),
+            (_, ColumnValue::String(_)) => Some(Ordering::Greater),
+        }
+    }
+}
+
+impl Ord for ColumnValue {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other).unwrap()
+    }
+}
+
+impl Hash for ColumnValue {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            ColumnValue::Integer(val) => val.hash(state),
+            ColumnValue::Float(val) => val.to_bits().hash(state),
+            ColumnValue::String(val) => val.hash(state),
+            ColumnValue::Null => 0.hash(state),
+        }
+    }
+}
+
+impl Add for ColumnValue {
+    type Output = ColumnValue;
+
+    fn add(self, other: ColumnValue) -> ColumnValue {
+        match (self, other) {
+            (ColumnValue::Integer(a), ColumnValue::Integer(b)) => ColumnValue::Integer(a + b),
+            (ColumnValue::Float(a), ColumnValue::Float(b)) => ColumnValue::Float(a + b),
+            (ColumnValue::Integer(a), ColumnValue::Float(b)) => ColumnValue::Float(a as f64 + b),
+            (ColumnValue::Float(a), ColumnValue::Integer(b)) => ColumnValue::Float(a + b as f64),
+            // Handle other combinations or return Null
+            _ => ColumnValue::Null,
+        }
+    }
+}
+
+impl AddAssign for ColumnValue {
+    fn add_assign(&mut self, other: ColumnValue) {
+        *self = self.clone() + other;
+    }
+}
+
+impl Mul for ColumnValue {
+    type Output = ColumnValue;
+
+    fn mul(self, other: ColumnValue) -> ColumnValue {
+        match (self, other) {
+            (ColumnValue::Integer(a), ColumnValue::Integer(b)) => ColumnValue::Integer(a * b),
+            (ColumnValue::Float(a), ColumnValue::Float(b)) => ColumnValue::Float(a * b),
+            (ColumnValue::Integer(a), ColumnValue::Float(b)) => ColumnValue::Float(a as f64 * b),
+            (ColumnValue::Float(a), ColumnValue::Integer(b)) => ColumnValue::Float(a * b as f64),
+            // Handle other combinations or return Null
+            _ => ColumnValue::Null,
+        }
+    }
+}
+
+impl Div for ColumnValue {
+    type Output = ColumnValue;
+
+    fn div(self, other: ColumnValue) -> ColumnValue {
+        match (self, other) {
+            (ColumnValue::Integer(a), ColumnValue::Integer(b)) => {
+                if b == 0 {
+                    ColumnValue::Null
+                } else {
+                    ColumnValue::Integer(a / b)
+                }
+            }
+            (ColumnValue::Float(a), ColumnValue::Float(b)) => {
+                if b == 0.0 {
+                    ColumnValue::Null
+                } else {
+                    ColumnValue::Float(a / b)
+                }
+            }
+            (ColumnValue::Integer(a), ColumnValue::Float(b)) => {
+                if b == 0.0 {
+                    ColumnValue::Null
+                } else {
+                    ColumnValue::Float(a as f64 / b)
+                }
+            }
+            (ColumnValue::Float(a), ColumnValue::Integer(b)) => {
+                if b == 0 {
+                    ColumnValue::Null
+                } else {
+                    ColumnValue::Float(a / b as f64)
+                }
+            }
+            // Handle other combinations or return Null
+            _ => ColumnValue::Null,
+        }
+    }
 }
 
 fn to_array(vec: Vec<u8>, array: &mut [u8], length: usize) {
@@ -127,6 +279,11 @@ impl<'a> From<&'a Column> for String {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct AggregateColumn(pub Aggregate, pub Column);
+
+pub type QueriedColumns = (Vec<Column>, Vec<AggregateColumn>);
+
 pub async fn get_columns<P: AsRef<Path>>(path: P) -> io::Result<Vec<Column>> {
     let mut columns = vec![];
 
@@ -177,4 +334,66 @@ pub fn parse_column_file_name(file_name: &str) -> Option<(String, ColumnType)> {
 /// The size of the index and timestamp columns which are both of type [`ColumnType::Integer`].
 pub fn index_and_timestamp_size() -> usize {
     ColumnType::Integer.size() + ColumnType::Integer.size()
+}
+
+pub fn parse_and_validate_queried_columns(
+    available_columns: &Vec<Column>,
+    queried_columns: &Vec<String>,
+) -> io::Result<QueriedColumns> {
+    let mut parsed_columns = vec![];
+    let mut parsed_aggregate_columns = vec![];
+
+    for queried_column in queried_columns {
+        let (aggregate, column) = try_parse_queried_column(queried_column)?;
+        let found_column = get_column(available_columns, column)?;
+        match aggregate {
+            Some(aggregate) => {
+                parsed_aggregate_columns.push(AggregateColumn(aggregate, found_column))
+            }
+            None => parsed_columns.push(found_column),
+        };
+    }
+
+    Ok((parsed_columns, parsed_aggregate_columns))
+}
+
+pub fn parse_and_validate_columns(
+    available_columns: &Vec<Column>,
+    columns: &Vec<String>,
+) -> io::Result<Vec<Column>> {
+    let mut parsed_columns = Vec::with_capacity(columns.len());
+    for column in columns {
+        let found_column = get_column(available_columns, column)?;
+
+        parsed_columns.push(found_column);
+    }
+
+    Ok(parsed_columns)
+}
+
+fn get_column(available_columns: &Vec<Column>, column: &str) -> io::Result<Column> {
+    available_columns
+        .into_iter()
+        .find(|&c| c.name == *column)
+        .ok_or(Error::new(
+            ErrorKind::Unsupported,
+            "One or more columns do not exist on table",
+        ))
+        .map(|c| c.clone())
+}
+
+fn try_parse_queried_column(queried_column: &str) -> io::Result<(Option<Aggregate>, &str)> {
+    let queried_column = queried_column.trim();
+    if let Some(open_paren_index) = queried_column.find('(') {
+        if let Some(close_paren_index) = queried_column.find(')') {
+            let function = (&queried_column[..open_paren_index]).trim();
+            let column = (&queried_column[open_paren_index + 1..close_paren_index]).trim();
+
+            if !function.is_empty() && !column.is_empty() {
+                return Ok((Some(function.into()), column));
+            }
+        }
+    }
+
+    Ok((None, queried_column))
 }
