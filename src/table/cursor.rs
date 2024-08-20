@@ -5,7 +5,7 @@ use std::ops::Div;
 use tokio::fs::File;
 use tokio::io;
 
-use crate::dio::file::seek;
+use crate::io::file::seek;
 use crate::table::aggregate::{Aggregable, GroupKey, GroupValue};
 use crate::table::column::{AggregateColumn, Column, ColumnType, index_and_timestamp_size};
 use crate::table::FromDisk;
@@ -67,7 +67,9 @@ pub struct Row<T>
 where
     T: Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
 {
+    #[allow(dead_code)]
     index_id: u64,
+    #[allow(dead_code)]
     timestamp: u64,
     values: Vec<(Column, T)>,
 }
@@ -97,14 +99,6 @@ where
             .iter()
             .find(|(c, _)| c == column)
             .map(|(_, v)| v)
-    }
-
-    pub fn take_value(&mut self, column: &Column) -> Option<T> {
-        if let Some(pos) = self.values.iter().position(|(c, _)| c == column) {
-            Some(self.values.remove(pos).1)
-        } else {
-            None
-        }
     }
 
     pub fn columns(&self) -> Vec<Column> {
@@ -147,10 +141,6 @@ where
             timestamp,
             value,
         }
-    }
-
-    pub fn is_index(&self) -> bool {
-        self.value.is_none()
     }
 
     pub fn same_row(&self, other: &RowComponent<T>) -> bool {

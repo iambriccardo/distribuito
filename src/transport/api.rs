@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -6,11 +5,11 @@ use axum::Json;
 use log::info;
 use serde::{Deserialize, Serialize};
 use serde_json::Number;
-use tokio::sync::Mutex;
 
+use crate::config::Config;
 use crate::table::column::{Column as TableColumn, ColumnType as TableColumnType, ColumnValue};
 use crate::table::cursor::{AggregatedRow, Row};
-use crate::table::table::{QueryResult, Table, TableDefinition};
+use crate::table::table::{QueryResult, TableDefinition};
 
 #[derive(Deserialize)]
 pub struct CreateTableRequest {
@@ -121,9 +120,9 @@ impl QueryResponse {
     }
 }
 
-#[derive(Clone)]
-pub struct AppState {
-    pub open_tables: Arc<Mutex<HashMap<String, Table>>>,
+#[derive(Debug, Clone)]
+pub struct DatabaseState {
+    pub config: Arc<Config>,
 }
 
 // TODO:
@@ -132,7 +131,7 @@ pub struct AppState {
 //            the query result is then merged into the table that was loaded locally.
 // - insert -> fans out the insert based on the statically configured partitioning.
 pub async fn create_table(
-    State(_): State<AppState>,
+    State(state): State<DatabaseState>,
     Json(request): Json<CreateTableRequest>,
 ) -> Json<String> {
     let columns = request
@@ -141,7 +140,7 @@ pub async fn create_table(
         .map(|c| TableColumn::new(c.name, c.ty.into()))
         .collect();
 
-    match TableDefinition::create(request.name, columns).await {
+    match TableDefinition::create(state.config.clone(), request.name, columns).await {
         Ok(_) => {
             info!("Table created successfully");
             Json("Table created successfully".to_string())
@@ -153,8 +152,12 @@ pub async fn create_table(
     }
 }
 
-pub async fn insert(State(_): State<AppState>, Json(request): Json<InsertRequest>) -> Json<String> {
-    let Ok(table_definition) = TableDefinition::open(request.into).await else {
+pub async fn insert(
+    State(state): State<DatabaseState>,
+    Json(request): Json<InsertRequest>,
+) -> Json<String> {
+    let Ok(table_definition) = TableDefinition::open(state.config.clone(), request.into).await
+    else {
         info!("Could not open table");
         return Json("Could not open table".to_string());
     };
@@ -174,10 +177,11 @@ pub async fn insert(State(_): State<AppState>, Json(request): Json<InsertRequest
 }
 
 pub async fn query(
-    State(_): State<AppState>,
+    State(state): State<DatabaseState>,
     Json(request): Json<QueryRequest>,
 ) -> Json<QueryResponse> {
-    let Ok(table_definition) = TableDefinition::open(request.from).await else {
+    let Ok(table_definition) = TableDefinition::open(state.config.clone(), request.from).await
+    else {
         return Json(QueryResponse::empty());
     };
 

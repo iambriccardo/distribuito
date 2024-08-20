@@ -8,6 +8,7 @@ This project is intended to be a playground for me to learn about database desig
 implementation lacks many features that I might add in the future.
 
 ## Features
+
 - Column-oriented with nearly infinite scalability for adding new columns.
 - File-based with an efficient custom file format (Apache Parquet support could be added in the future).
 - Distributed query execution across multiple nodes (still TBD).

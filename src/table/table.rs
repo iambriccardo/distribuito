@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::u64;
 
@@ -9,7 +10,8 @@ use serde_json::Value;
 use tokio::fs::{create_dir_all, File};
 use tokio::io;
 
-use crate::dio::file::{create_and_open_file, create_file, seek_or, write, write_end};
+use crate::config::Config;
+use crate::io::file::{create_and_open_file, create_file, seek_or, write, write_end};
 use crate::table::aggregate::GroupValue;
 use crate::table::column::{
     AggregateColumn, Column, ColumnType, ColumnValue,
@@ -21,23 +23,29 @@ fn add_extension(file_name: &str) -> String {
     format!("{}.dsto", file_name)
 }
 
-fn build_table_path(table_name: &str) -> io::Result<PathBuf> {
-    let home_path = home::home_dir()
-        .ok_or_else(|| Error::new(ErrorKind::NotFound, "Impossible to get home directory"))?;
+fn build_table_path(config: &Config, table_name: &str) -> PathBuf {
+    let mut path_buf = PathBuf::new();
+    path_buf.push(config.database_path.clone());
+    path_buf.push(config.database_name.clone());
+    path_buf.push(table_name);
 
-    // TODO: we might want to make the path configurable via CLI.
-    Ok(home_path.join(format!(".distribuito/{}", table_name)))
+    path_buf
 }
 
 #[derive(Debug)]
 pub struct TableDefinition {
+    config: Arc<Config>,
     name: String,
     columns: Vec<Column>,
 }
 
 impl TableDefinition {
-    pub async fn create(name: String, columns: Vec<Column>) -> io::Result<Self> {
-        let table_path = build_table_path(&name)?;
+    pub async fn create(
+        config: Arc<Config>,
+        name: String,
+        columns: Vec<Column>,
+    ) -> io::Result<Self> {
+        let table_path = build_table_path(&config, &name);
 
         create_dir_all(&table_path).await?;
 
@@ -51,22 +59,27 @@ impl TableDefinition {
 
         info!("Created table {name} with {} columns", columns.len());
 
-        Ok(Self { name, columns })
+        Ok(Self {
+            config: config.clone(),
+            name,
+            columns,
+        })
     }
 
-    pub async fn open(name: String) -> io::Result<Self> {
-        let table_path = build_table_path(&name)?;
+    pub async fn open(config: Arc<Config>, name: String) -> io::Result<Self> {
+        let table_path = build_table_path(&config, &name);
 
         info!("Opened table {name}");
 
         Ok(Self {
+            config: config.clone(),
             name,
             columns: get_columns(&table_path).await?,
         })
     }
 
     pub async fn load(self) -> io::Result<Table> {
-        let table_path = build_table_path(&self.name)?;
+        let table_path = build_table_path(&self.config, &self.name);
         create_dir_all(&table_path).await?;
 
         let index_file = create_and_open_file(&add_extension(".index"), &table_path).await?;
@@ -415,7 +428,7 @@ impl Table {
 
     async fn open_column_files(&self, columns: &Vec<Column>) -> io::Result<Vec<File>> {
         // We open all columns files since we want to append to each of them.
-        let table_path = build_table_path(&self.definition.name)?;
+        let table_path = build_table_path(&self.definition.config, &self.definition.name);
 
         let mut column_files = vec![];
         for column in columns {
