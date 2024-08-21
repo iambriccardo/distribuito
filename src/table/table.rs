@@ -1,23 +1,25 @@
+use std::collections::hash_map::Entry;
+use axum::extract::Query;
+use log::info;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::u64;
-
-use log::info;
-use serde_json::Value;
 use tokio::fs::{create_dir_all, File};
 use tokio::io;
 
 use crate::config::Config;
 use crate::io::file::{create_and_open_file, create_file, seek_or, write, write_end};
-use crate::table::aggregate::GroupValue;
+use crate::table::aggregate::{GroupKey, GroupValue};
 use crate::table::column::{
     get_columns, parse_and_validate_columns, parse_and_validate_queried_columns, AggregateColumn,
     Column, ColumnType, ColumnValue,
 };
 use crate::table::cursor::{AggregatedRow, ColumnCursor, IndexCursor, Row};
+use crate::transport::api::QueryResponse;
 
 fn add_extension(file_name: &str) -> String {
     format!("{}.dsto", file_name)
@@ -127,7 +129,7 @@ impl TableStats {
             &mut next_index,
             &u64::to_le_bytes(0),
         )
-        .await?;
+            .await?;
 
         Ok(TableStats {
             file,
@@ -146,7 +148,7 @@ impl TableStats {
             ColumnType::Integer.size() as u64,
             &u64::to_le_bytes(self.row_count),
         )
-        .await?;
+            .await?;
 
         Ok(())
     }
@@ -367,14 +369,14 @@ impl Table {
                         timestamp,
                         &i64::to_le_bytes(number.as_i64().unwrap()),
                     )
-                    .await?;
+                        .await?;
                 } else if number.is_f64() {
                     self.write_value(
                         column_file,
                         timestamp,
                         &f64::to_le_bytes(number.as_f64().unwrap()),
                     )
-                    .await?;
+                        .await?;
                 } else {
                     return Err(Error::new(
                         ErrorKind::Unsupported,
@@ -450,6 +452,56 @@ pub enum QueryResult {
 }
 
 impl QueryResult {
+    pub fn merge(self, other: QueryResult) -> io::Result<QueryResult> {
+        match (self, other) {
+            (QueryResult::Rows(left), QueryResult::Rows(right)) => Ok(QueryResult::Rows(Self::merge_rows(left, right))),
+            (QueryResult::AggregatedRows(left), QueryResult::AggregatedRows(right)) => Ok(QueryResult::AggregatedRows(Self::merge_aggregated_rows(left, right))),
+            (_, _) => Err(Error::new(ErrorKind::InvalidData, "Merging rows of different type is not possible"))
+        }
+    }
+
+    fn merge_rows(mut left: Vec<Row<ColumnValue>>, mut right: Vec<Row<ColumnValue>>) -> Vec<Row<ColumnValue>> {
+        left.append(&mut right);
+        left
+    }
+
+    fn merge_aggregated_rows(left: Vec<AggregatedRow<ColumnValue>>, right: Vec<AggregatedRow<ColumnValue>>) -> Vec<AggregatedRow<ColumnValue>> {
+        let mut groups: HashMap<GroupKey<ColumnValue>, GroupValue<ColumnValue>> = HashMap::new();
+
+        // TODO: reduce duplication.
+        for left_row in left {
+            let (group_key, group_value) = left_row.to_group();
+            match groups.entry(group_key) {
+                Entry::Occupied(mut entry) => {
+                    entry.get_mut().merge(group_value);
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(group_value);
+                }
+            }
+        }
+
+        for right_row in right {
+            let (group_key, group_value) = right_row.to_group();
+            match groups.entry(group_key) {
+                Entry::Occupied(mut entry) => {
+                    entry.get_mut().merge(group_value);
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(group_value);
+                }
+            }
+        }
+
+        let mut aggregated_rows = vec![];
+        for (group_key, group_value) in groups {
+            // TODO: return columns ordered in the order in which they were supplied.
+            aggregated_rows.push(AggregatedRow::from_group(group_key, group_value));
+        }
+
+        aggregated_rows
+    }
+
     pub fn is_empty(&self) -> bool {
         match self {
             QueryResult::Rows(rows) => rows.is_empty(),

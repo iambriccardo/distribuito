@@ -16,7 +16,7 @@ where
     T: Aggregable<T> + Div<Output = T> + Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
 {
     values: Vec<(Column, T)>,
-    aggregates: Vec<(AggregateColumn, T, Option<Vec<T>>)>,
+    aggregates: Vec<(AggregateColumn, T, Vec<T>)>,
 }
 
 impl<T> AggregatedRow<T>
@@ -37,7 +37,15 @@ where
         }
     }
 
-    pub fn into_values(self) -> (Vec<T>, Vec<(T, Option<Vec<T>>)>) {
+    pub fn to_group(self) -> (GroupKey<T>, GroupValue<T>) {
+        let group_key = GroupKey(self.values.into_iter().collect());
+        let group_value =
+            GroupValue::from_aggregates(self.aggregates.into_iter().map(|(a, v, c)| (a, c)).collect());
+
+        (group_key, group_value)
+    }
+
+    pub fn into_values(self) -> (Vec<T>, Vec<(T, Vec<T>)>) {
         let values = self.values.into_iter().map(|(_, v)| v).collect();
         let aggregates = self
             .aggregates

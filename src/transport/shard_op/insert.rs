@@ -12,7 +12,7 @@ impl<'a> Insert<'a> {
     }
 }
 
-impl<'a> ShardOp<InsertRequest, ()> for Insert<'a> {
+impl<'a> ShardOp<InsertRequest, String> for Insert<'a> {
     fn input(&self) -> &InsertRequest {
         &self.request
     }

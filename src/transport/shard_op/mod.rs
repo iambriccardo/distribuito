@@ -1,5 +1,6 @@
 pub mod create_table;
 pub mod insert;
+pub mod query;
 
 use crate::transport::shard::Shard;
 use serde::{Deserialize, Serialize};

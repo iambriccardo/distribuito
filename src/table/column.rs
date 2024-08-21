@@ -285,7 +285,7 @@ impl<'a> From<&'a Column> for String {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct AggregateColumn(pub Aggregate, pub Column);
 
 impl From<AggregateColumn> for String {

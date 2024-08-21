@@ -1,11 +1,11 @@
-use std::ops::Deref;
-use std::sync::Arc;
-
 use axum::extract::State;
 use axum::Json;
 use log::info;
 use serde::{Deserialize, Serialize};
-use serde_json::Number;
+use serde_json::{Number, Value};
+use std::io::{Error, ErrorKind};
+use std::ops::Deref;
+use std::sync::Arc;
 
 use crate::config::Config;
 use crate::table::column::{Column as TableColumn, ColumnType as TableColumnType, ColumnValue};
@@ -14,6 +14,7 @@ use crate::table::table::{QueryResult, TableDefinition};
 use crate::transport::shard::Shards;
 use crate::transport::shard_op::create_table::CreateTable;
 use crate::transport::shard_op::insert::Insert;
+use crate::transport::shard_op::query::Query;
 
 #[derive(Deserialize, Serialize)]
 pub struct CreateTableRequest {
@@ -21,7 +22,7 @@ pub struct CreateTableRequest {
     columns: Vec<Column>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct Column {
     name: String,
     ty: ColumnType,
@@ -36,7 +37,13 @@ impl From<TableColumn> for Column {
     }
 }
 
-#[derive(Deserialize, Serialize)]
+impl From<Column> for TableColumn {
+    fn from(value: Column) -> Self {
+        TableColumn::new(value.name.clone(), value.ty.into())
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ColumnType {
     Integer,
@@ -106,7 +113,7 @@ impl InsertRequest {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct QueryRequest {
     select: Vec<String>,
     from: String,
@@ -114,14 +121,13 @@ pub struct QueryRequest {
     group_by: Option<Vec<String>>,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct Aggregate {
     value: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    components: Option<Vec<serde_json::Value>>,
+    components: Vec<serde_json::Value>,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum QueryResponse {
     Empty {
@@ -140,6 +146,85 @@ pub enum QueryResponse {
 }
 
 impl QueryResponse {
+    pub fn to_query_result(self) -> QueryResult {
+        match self {
+            QueryResponse::Empty { .. } => {
+                info!("An empty query response was received and was converted to empty rows");
+                QueryResult::Rows(vec![])
+            }
+            QueryResponse::WithData { columns, data } => {
+                Self::build_row_query_result(columns, data)
+            }
+            QueryResponse::WithAggregatedData {
+                columns,
+                aggregate_columns,
+                data,
+                aggregates,
+            } => Self::build_aggregated_row_query_result(
+                columns,
+                aggregate_columns,
+                data,
+                aggregates,
+            ),
+        }
+    }
+
+    fn build_row_query_result(
+        columns: Vec<Column>,
+        data: Vec<Vec<serde_json::Value>>,
+    ) -> QueryResult {
+        let mut rows = vec![];
+        println!("RECEIVED DATA {:?}", data);
+        for entry in data {
+            let Some(row) = Row::from_components(
+                // TODO: figure out if we need propagation of index_id and timestamp.
+                0,
+                0,
+                columns.iter().zip(entry.into_iter()).map(|(c, v)| Self::build_row_component(c, v)),
+            ) else {
+                info!("Row skipped during conversion");
+                continue;
+            };
+            rows.push(row);
+        }
+
+        QueryResult::Rows(rows)
+    }
+
+    fn build_aggregated_row_query_result(
+        columns: Vec<Column>,
+        aggregate_columns: Vec<Column>,
+        data: Vec<Vec<serde_json::Value>>,
+        aggregates: Vec<Vec<Aggregate>>,
+    ) -> QueryResult {
+        QueryResult::AggregatedRows(vec![])
+    }
+    
+    fn build_row_component(column: &Column, value: serde_json::Value) -> (TableColumn, ColumnValue) {
+        let table_column = column.clone().into();
+        match (&column.ty, value) {
+            (ColumnType::Integer, serde_json::Value::Number(number)) => {
+                if number.is_i64() {
+                    return (table_column, ColumnValue::Integer(number.as_i64().unwrap()));
+                }
+            }
+            (ColumnType::Float, serde_json::Value::Number(number)) => {
+                if number.is_f64() {
+                    return (table_column, ColumnValue::Float(number.as_f64().unwrap()));
+                }
+            }
+            (ColumnType::String, serde_json::Value::String(string)) => {
+                return (table_column, ColumnValue::String(string));
+            }
+            (ColumnType::Null, serde_json::Value::Null) => {
+                return (table_column, ColumnValue::Null);
+            }
+            _ => {}
+        }
+
+        (table_column, ColumnValue::Null)
+    }
+
     pub fn empty() -> Self {
         Self::Empty { errors: vec![] }
     }
@@ -158,14 +243,16 @@ pub async fn create_table(
     // We broadcast table creation to all shards.
     if let Some(shards) = state.shards.deref() {
         let create_table = CreateTable::new(&request);
-        let _ = shards.broadcast(create_table).await;
+        if let Err(error) = shards.broadcast(create_table).await {
+            info!("Error while creating table in the shards: {}", error);
+            return Json(format!(
+                "Error while creating table  in the shards: {}",
+                error
+            ));
+        };
     }
 
-    let columns = request
-        .columns
-        .into_iter()
-        .map(|c| TableColumn::new(c.name, c.ty.into()))
-        .collect();
+    let columns = request.columns.into_iter().map(|c| c.into()).collect();
 
     match TableDefinition::create(state.config.clone(), request.name, columns).await {
         Ok(_) => {
@@ -186,12 +273,18 @@ pub async fn insert(
     // We unicast in a round-robin fashion the insertions to the shards.
     if let Some(shards) = state.shards.deref() {
         let mut requests = request.split(shards.number_of_shards() + 1);
-        println!("REQUESTS {:?}", requests.len());
         request = requests.remove(0);
 
         for request in requests {
             let insert = Insert::new(&request);
-            let _ = shards.rr_unicast(insert).await;
+            if let Err(error) = shards.rr_unicast(insert).await {
+                info!("Error while inserting data in the shards: {}",
+                    error);
+                return Json(format!(
+                    "Error while inserting data in the shards: {}",
+                    error
+                ));
+            }
         }
     }
 
@@ -219,17 +312,49 @@ pub async fn query(
     State(state): State<DatabaseState>,
     Json(request): Json<QueryRequest>,
 ) -> Json<QueryResponse> {
+    // We broadcast the query request to all shards.
+    let mut shard_query_results = vec![];
+    if let Some(shards) = state.shards.deref() {
+        let query = Query::new(&request);
+        match shards.broadcast(query).await {
+            Ok(query_responses) => {
+                for query_response in query_responses {
+                    shard_query_results.push(query_response.to_query_result());
+                }
+            }
+            Err(error) => {
+                info!("Error while querying data from the shards: {}",
+                    error);
+                return Json(QueryResponse::empty());
+            }
+        }
+    }
+
     let Ok(table_definition) = TableDefinition::open(state.config.clone(), request.from).await
     else {
+        info!("Could not open table");
         return Json(QueryResponse::empty());
     };
 
     let Ok(mut table) = table_definition.load().await else {
+        info!("Could not load table");
         return Json(QueryResponse::empty());
     };
 
     match table.query(request.select, request.group_by).await {
-        Ok(query_result) => Json(serialize_query_result(query_result)),
+        Ok(query_result) => {
+            let mut query_result = query_result;
+
+            for shard_query_result in shard_query_results {
+                let Ok(merged_query_result) = query_result.merge(shard_query_result) else {
+                    info!("Merging of query results failed");
+                    return Json(QueryResponse::empty());
+                };
+                query_result = merged_query_result;
+            }
+
+            Json(serialize_query_result(query_result))
+        }
         Err(error) => {
             info!("Error while querying table {}: {}", table.name(), error);
             Json(QueryResponse::empty())
@@ -285,7 +410,7 @@ fn serialize_rows_data(rows: Vec<Row<ColumnValue>>) -> Vec<Vec<serde_json::Value
 
         let mut serialized_values = Vec::with_capacity(values.len());
         for value in values {
-            serialized_values.push(serialize_column_value(value));
+            serialized_values.push(value.into());
         }
 
         serialized_data.push(serialized_values);
@@ -305,16 +430,15 @@ fn serialize_aggregated_rows_data(
 
         let mut serialized_values = Vec::with_capacity(values.len());
         for value in values {
-            serialized_values.push(serialize_column_value(value));
+            serialized_values.push(value.into());
         }
         serialized_data.push(serialized_values);
 
         let mut serialized_aggregate_values = Vec::with_capacity(aggregate_values.len());
         for (aggregate_value, aggregate_components) in aggregate_values {
             let serialized_aggregate = Aggregate {
-                value: serialize_column_value(aggregate_value),
-                components: aggregate_components
-                    .map(|a| a.into_iter().map(|v| serialize_column_value(v)).collect()),
+                value: aggregate_value.into(),
+                components: aggregate_components.into_iter().map(|a| a.into()).collect(),
             };
             serialized_aggregate_values.push(serialized_aggregate);
         }
@@ -324,11 +448,15 @@ fn serialize_aggregated_rows_data(
     (serialized_data, serialized_aggregates)
 }
 
-fn serialize_column_value(column_value: ColumnValue) -> serde_json::Value {
-    match column_value {
-        ColumnValue::Integer(value) => serde_json::Value::Number(Number::from(value)),
-        ColumnValue::Float(value) => serde_json::Value::Number(Number::from_f64(value).unwrap()),
-        ColumnValue::String(value) => serde_json::Value::String(value),
-        ColumnValue::Null => serde_json::Value::Null,
+impl From<ColumnValue> for serde_json::Value {
+    fn from(value: ColumnValue) -> Self {
+        match value {
+            ColumnValue::Integer(value) => serde_json::Value::Number(Number::from(value)),
+            ColumnValue::Float(value) => {
+                serde_json::Value::Number(Number::from_f64(value).unwrap())
+            }
+            ColumnValue::String(value) => serde_json::Value::String(value),
+            ColumnValue::Null => serde_json::Value::Null,
+        }
     }
 }

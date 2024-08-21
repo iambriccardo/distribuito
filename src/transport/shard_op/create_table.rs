@@ -12,7 +12,7 @@ impl<'a> CreateTable<'a> {
     }
 }
 
-impl<'a> ShardOp<CreateTableRequest, ()> for CreateTable<'a> {
+impl<'a> ShardOp<CreateTableRequest, String> for CreateTable<'a> {
     fn input(&self) -> &CreateTableRequest {
         self.request
     }

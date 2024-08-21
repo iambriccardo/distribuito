@@ -6,7 +6,7 @@ use std::ops::Div;
 use crate::table::column::{AggregateColumn, Column, ColumnValue};
 use crate::table::cursor::Row;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub enum Aggregate {
     Count,
     Sum,
@@ -66,6 +66,20 @@ where
         }
     }
 
+    pub fn from_components_array(
+        aggregate_column: &AggregateColumn,
+        mut components: Vec<T>,
+    ) -> Self {
+        match aggregate_column.0 {
+            Aggregate::Count => AggregateComponents::Count(components.remove(0)),
+            Aggregate::Sum => AggregateComponents::Sum(components.remove(0)),
+            Aggregate::Avg => AggregateComponents::Avg {
+                sum: components.remove(0),
+                count: components.remove(0),
+            },
+        }
+    }
+
     pub fn aggregate(&mut self, value: &T) {
         match self {
             AggregateComponents::Count(count) => count.merge(MergeOp::Count, value.clone()),
@@ -77,12 +91,37 @@ where
         }
     }
 
-    pub fn compute(self) -> (T, Option<Vec<T>>) {
+    pub fn merge(&mut self, other: AggregateComponents<T>) {
+        match (self, other) {
+            (AggregateComponents::Count(ref mut left), AggregateComponents::Count(right)) => {
+                left.merge(MergeOp::Count, right);
+            }
+            (AggregateComponents::Sum(ref mut left), AggregateComponents::Sum(right)) => {
+                left.merge(MergeOp::Sum, right);
+            }
+            (
+                AggregateComponents::Avg {
+                    sum: ref mut left_sum,
+                    count: ref mut left_count,
+                },
+                AggregateComponents::Avg {
+                    sum: right_sum,
+                    count: right_count,
+                },
+            ) => {
+                left_sum.merge(MergeOp::Sum, right_sum);
+                left_count.merge(MergeOp::Count, right_count);
+            }
+            _ => {}
+        };
+    }
+
+    pub fn compute(self) -> (T, Vec<T>) {
         match self {
-            AggregateComponents::Count(count) => (count, None),
-            AggregateComponents::Sum(sum) => (sum, None),
+            AggregateComponents::Count(count) => (count.clone(), vec![count]),
+            AggregateComponents::Sum(sum) => (sum.clone(), vec![sum]),
             AggregateComponents::Avg { sum, count } => {
-                (sum.clone() / count.clone(), Some(vec![sum, count]))
+                (sum.clone() / count.clone(), vec![sum, count])
             }
         }
     }
@@ -117,12 +156,40 @@ where
         }
     }
 
+    pub fn from_aggregates(aggregates: Vec<(AggregateColumn, Vec<T>)>) -> GroupValue<T> {
+        Self {
+            aggregates: aggregates
+                .into_iter()
+                .map(|(a, c)| {
+                    let c = AggregateComponents::from_components_array(&a, c);
+                    (a, c)
+                })
+                .collect(),
+        }
+    }
+
     pub fn add(&mut self, row: Row<T>) {
         for (aggregate_column, aggregate_components) in self.aggregates.iter_mut() {
             // TODO: take value out of the array instead of cloning.
             if let Some(value) = row.value(&aggregate_column.1) {
                 aggregate_components.aggregate(value);
             }
+        }
+    }
+
+    pub fn merge(&mut self, mut other: GroupValue<T>) {
+        for (aggregate_column, aggregate_components) in self.aggregates.iter_mut() {
+            let Some(matching_aggregate_position) = other
+                .aggregates
+                .iter()
+                .position(|(a, c)| *aggregate_column == *a)
+            else {
+                continue;
+            };
+
+            let (_, other_aggregate_components) =
+                other.aggregates.remove(matching_aggregate_position);
+            aggregate_components.merge(other_aggregate_components);
         }
     }
 }
@@ -143,7 +210,6 @@ impl Aggregable<ColumnValue> for ColumnValue {
     }
 
     fn merge(&mut self, merge_op: MergeOp, other: ColumnValue) {
-        // TODO: maybe instead of &mut we want to consume the value and return a new one.
         *self = match merge_op {
             MergeOp::Count => self.clone() + ColumnValue::Integer(1),
             MergeOp::Sum => self.clone() + other,
