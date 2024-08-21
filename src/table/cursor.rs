@@ -7,7 +7,7 @@ use tokio::io;
 
 use crate::io::file::seek;
 use crate::table::aggregate::{Aggregable, GroupKey, GroupValue};
-use crate::table::column::{AggregateColumn, Column, ColumnType, index_and_timestamp_size};
+use crate::table::column::{index_and_timestamp_size, AggregateColumn, Column, ColumnType};
 use crate::table::FromDisk;
 
 #[derive(Debug)]

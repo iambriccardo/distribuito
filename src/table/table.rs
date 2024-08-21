@@ -14,8 +14,8 @@ use crate::config::Config;
 use crate::io::file::{create_and_open_file, create_file, seek_or, write, write_end};
 use crate::table::aggregate::GroupValue;
 use crate::table::column::{
-    AggregateColumn, Column, ColumnType, ColumnValue,
-    get_columns, parse_and_validate_columns, parse_and_validate_queried_columns,
+    get_columns, parse_and_validate_columns, parse_and_validate_queried_columns, AggregateColumn,
+    Column, ColumnType, ColumnValue,
 };
 use crate::table::cursor::{AggregatedRow, ColumnCursor, IndexCursor, Row};
 

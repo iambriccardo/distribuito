@@ -1,3 +1,4 @@
+use std::ops::Deref;
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -10,8 +11,10 @@ use crate::config::Config;
 use crate::table::column::{Column as TableColumn, ColumnType as TableColumnType, ColumnValue};
 use crate::table::cursor::{AggregatedRow, Row};
 use crate::table::table::{QueryResult, TableDefinition};
+use crate::transport::shard::Shards;
+use crate::transport::shard_op::create_table::CreateTable;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct CreateTableRequest {
     name: String,
     columns: Vec<Column>,
@@ -123,17 +126,19 @@ impl QueryResponse {
 #[derive(Debug, Clone)]
 pub struct DatabaseState {
     pub config: Arc<Config>,
+    pub shards: Arc<Option<Shards>>,
 }
 
-// TODO:
-// Sharded impl:
-// - query -> fans out the query to x nodes and builds QueryResult from the responses
-//            the query result is then merged into the table that was loaded locally.
-// - insert -> fans out the insert based on the statically configured partitioning.
 pub async fn create_table(
     State(state): State<DatabaseState>,
     Json(request): Json<CreateTableRequest>,
 ) -> Json<String> {
+    // We broadcast table creation to all shards.
+    if let Some(shards) = state.shards.deref() {
+        let create_table = CreateTable::new(&request);
+        let _ = shards.broadcast(create_table).await;
+    }
+
     let columns = request
         .columns
         .into_iter()

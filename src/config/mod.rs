@@ -1,21 +1,39 @@
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio::fs::{create_dir_all, read_to_string};
 use tokio::io;
 
 use crate::io::file::create_file;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all(deserialize = "lowercase"))]
+pub enum InstanceRole {
+    Master,
+    Slave,
+}
+
+impl<'a> From<&'a InstanceRole> for &'a str {
+    fn from(value: &'a InstanceRole) -> Self {
+        match value {
+            InstanceRole::Master => "master",
+            InstanceRole::Slave => "slave",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Instance {
     pub ip_port: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct Config {
+    pub instance_role: InstanceRole,
+    pub database_ip_port: String,
     pub database_name: String,
     pub database_path: String,
-    pub instances: Vec<Instance>
+    pub instances: Vec<Instance>,
 }
 
 impl Config {
