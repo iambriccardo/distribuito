@@ -1,6 +1,8 @@
 use crate::config::Config;
 use crate::transport::http::post;
 use crate::transport::shard_op::ShardOp;
+use futures::future::join_all;
+use log::info;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
@@ -47,18 +49,29 @@ impl Shards {
         }
     }
 
+    pub fn number_of_shards(&self) -> usize {
+        self.shards.len()
+    }
+
     pub async fn broadcast<I: Serialize, O: for<'a> Deserialize<'a>>(
         &self,
         shard_op: impl ShardOp<I, O>,
     ) -> io::Result<Vec<O>> {
-        let mut results = Vec::with_capacity(self.shards.len());
+        // Create a collection of futures representing each shard operation.
+        let futures: Vec<_> = self
+            .shards
+            .iter()
+            .map(|shard| {
+                info!("Broadcasting shard op to '{}'", shard_op.url(shard));
+                shard.call(&shard_op)
+            }) // Generate the future for each shard call.
+            .collect();
 
-        for shard in self.shards.iter() {
-            let result = shard.call(&shard_op).await?;
-            results.push(result)
-        }
+        // Wait for all futures to complete.
+        let results = join_all(futures).await;
 
-        Ok(results)
+        // Collect the results, returning an error if any call failed.
+        results.into_iter().collect::<Result<Vec<_>, _>>()
     }
 
     pub async fn rr_unicast<I: Serialize, O: for<'a> Deserialize<'a>>(
@@ -66,6 +79,8 @@ impl Shards {
         shard_op: impl ShardOp<I, O>,
     ) -> io::Result<O> {
         let shard = self.next_shard();
+        info!("Sending shard op to '{}'", shard_op.url(shard));
+
         let result = shard.call(&shard_op).await?;
 
         Ok(result)

@@ -13,6 +13,7 @@ use crate::table::cursor::{AggregatedRow, Row};
 use crate::table::table::{QueryResult, TableDefinition};
 use crate::transport::shard::Shards;
 use crate::transport::shard_op::create_table::CreateTable;
+use crate::transport::shard_op::insert::Insert;
 
 #[derive(Deserialize, Serialize)]
 pub struct CreateTableRequest {
@@ -77,11 +78,32 @@ impl<'a> From<&'a ColumnValue> for ColumnType {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct InsertRequest {
     insert: Vec<String>,
     into: String,
     values: Vec<Vec<serde_json::Value>>,
+}
+
+impl InsertRequest {
+    /// Splits the insert request into multiple insert requests that contain a subset of the values
+    /// each.
+    pub fn split(&mut self, n: usize) -> Vec<InsertRequest> {
+        // Calculate the size of each chunk
+        let chunk_size = (self.values.len() + n - 1) / n;
+
+        // Create an iterator over the values split into chunks
+        let chunks = self.values.chunks(chunk_size);
+
+        // Map each chunk into a new InsertRequest
+        chunks
+            .map(|chunk| InsertRequest {
+                insert: self.insert.clone(),
+                into: self.into.clone(),
+                values: chunk.to_vec(),
+            })
+            .collect()
+    }
 }
 
 #[derive(Deserialize)]
@@ -159,8 +181,20 @@ pub async fn create_table(
 
 pub async fn insert(
     State(state): State<DatabaseState>,
-    Json(request): Json<InsertRequest>,
+    Json(mut request): Json<InsertRequest>,
 ) -> Json<String> {
+    // We unicast in a round-robin fashion the insertions to the shards.
+    if let Some(shards) = state.shards.deref() {
+        let mut requests = request.split(shards.number_of_shards() + 1);
+        println!("REQUESTS {:?}", requests.len());
+        request = requests.remove(0);
+
+        for request in requests {
+            let insert = Insert::new(&request);
+            let _ = shards.rr_unicast(insert).await;
+        }
+    }
+
     let Ok(table_definition) = TableDefinition::open(state.config.clone(), request.into).await
     else {
         info!("Could not open table");
