@@ -110,7 +110,7 @@ where
                 },
             ) => {
                 left_sum.merge(MergeOp::Sum, right_sum);
-                left_count.merge(MergeOp::Count, right_count);
+                left_count.merge(MergeOp::Sum, right_count);
             }
             _ => {}
         };
