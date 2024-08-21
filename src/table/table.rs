@@ -1,7 +1,7 @@
-use std::collections::hash_map::Entry;
 use axum::extract::Query;
 use log::info;
 use serde_json::Value;
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::path::PathBuf;
@@ -454,23 +454,40 @@ pub enum QueryResult {
 impl QueryResult {
     pub fn merge(self, other: QueryResult) -> io::Result<QueryResult> {
         match (self, other) {
-            (QueryResult::Rows(left), QueryResult::Rows(right)) => Ok(QueryResult::Rows(Self::merge_rows(left, right))),
-            (QueryResult::AggregatedRows(left), QueryResult::AggregatedRows(right)) => Ok(QueryResult::AggregatedRows(Self::merge_aggregated_rows(left, right))),
-            (_, _) => Err(Error::new(ErrorKind::InvalidData, "Merging rows of different type is not possible"))
+            (QueryResult::Rows(left), QueryResult::Rows(right)) => {
+                Ok(QueryResult::Rows(Self::merge_rows(left, right)))
+            }
+            (QueryResult::AggregatedRows(left), QueryResult::AggregatedRows(right)) => Ok(
+                QueryResult::AggregatedRows(Self::merge_aggregated_rows(left, right)),
+            ),
+            (_, _) => Err(Error::new(
+                ErrorKind::InvalidData,
+                "Merging rows of different type is not possible",
+            )),
         }
     }
 
-    fn merge_rows(mut left: Vec<Row<ColumnValue>>, mut right: Vec<Row<ColumnValue>>) -> Vec<Row<ColumnValue>> {
+    fn merge_rows(
+        mut left: Vec<Row<ColumnValue>>,
+        mut right: Vec<Row<ColumnValue>>,
+    ) -> Vec<Row<ColumnValue>> {
         left.append(&mut right);
         left
     }
 
-    fn merge_aggregated_rows(left: Vec<AggregatedRow<ColumnValue>>, right: Vec<AggregatedRow<ColumnValue>>) -> Vec<AggregatedRow<ColumnValue>> {
+    fn merge_aggregated_rows(
+        left: Vec<AggregatedRow<ColumnValue>>,
+        right: Vec<AggregatedRow<ColumnValue>>,
+    ) -> Vec<AggregatedRow<ColumnValue>> {
         let mut groups: HashMap<GroupKey<ColumnValue>, GroupValue<ColumnValue>> = HashMap::new();
+
+        println!("LEFT {:?}", left);
+        println!("RIGHT {:?}", right);
 
         // TODO: reduce duplication.
         for left_row in left {
             let (group_key, group_value) = left_row.to_group();
+            println!("GROUP VALUE {:?}", group_value);
             match groups.entry(group_key) {
                 Entry::Occupied(mut entry) => {
                     entry.get_mut().merge(group_value);
@@ -481,8 +498,11 @@ impl QueryResult {
             }
         }
 
+        println!("-");
+
         for right_row in right {
             let (group_key, group_value) = right_row.to_group();
+            println!("GROUP VALUE {:?}", group_value);
             match groups.entry(group_key) {
                 Entry::Occupied(mut entry) => {
                     entry.get_mut().merge(group_value);

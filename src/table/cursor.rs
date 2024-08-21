@@ -13,7 +13,7 @@ use crate::table::FromDisk;
 #[derive(Debug)]
 pub struct AggregatedRow<T>
 where
-    T: Aggregable<T> + Div<Output = T> + Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
+    T: Aggregable<T> + Div<Output=T> + Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
 {
     values: Vec<(Column, T)>,
     aggregates: Vec<(AggregateColumn, T, Vec<T>)>,
@@ -21,8 +21,15 @@ where
 
 impl<T> AggregatedRow<T>
 where
-    T: Aggregable<T> + Div<Output = T> + Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
+    T: Aggregable<T> + Div<Output=T> + Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
 {
+    pub fn new(values: impl IntoIterator<Item=(Column, T)>, aggregates: impl IntoIterator<Item=(AggregateColumn, T, Vec<T>)>) -> Self {
+        Self {
+            values: values.into_iter().collect(),
+            aggregates: aggregates.into_iter().collect(),
+        }
+    }
+
     pub fn from_group(group_key: GroupKey<T>, group_value: GroupValue<T>) -> Self {
         Self {
             values: group_key.0.into_iter().collect(),
@@ -39,8 +46,12 @@ where
 
     pub fn to_group(self) -> (GroupKey<T>, GroupValue<T>) {
         let group_key = GroupKey(self.values.into_iter().collect());
-        let group_value =
-            GroupValue::from_aggregates(self.aggregates.into_iter().map(|(a, v, c)| (a, c)).collect());
+        let group_value = GroupValue::from_aggregates(
+            self.aggregates
+                .into_iter()
+                .map(|(a, v, c)| (a, c))
+                .collect(),
+        );
 
         (group_key, group_value)
     }
@@ -89,7 +100,7 @@ where
     pub fn from_components(
         index_id: u64,
         timestamp: u64,
-        row_components: impl IntoIterator<Item = (Column, T)>,
+        row_components: impl IntoIterator<Item=(Column, T)>,
     ) -> Option<Self> {
         Some(Self {
             index_id,

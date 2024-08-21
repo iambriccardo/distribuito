@@ -398,7 +398,7 @@ fn get_column(available_columns: &Vec<Column>, column: &str) -> io::Result<Colum
         .map(|c| c.clone())
 }
 
-fn try_parse_queried_column(queried_column: &str) -> io::Result<(Option<Aggregate>, &str)> {
+pub fn try_parse_queried_column(queried_column: &str) -> io::Result<(Option<Aggregate>, &str)> {
     let queried_column = queried_column.trim();
     if let Some(open_paren_index) = queried_column.find('(') {
         if let Some(close_paren_index) = queried_column.find(')') {

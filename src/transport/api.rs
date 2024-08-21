@@ -4,11 +4,13 @@ use log::info;
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
 use std::io::{Error, ErrorKind};
+use std::iter::zip;
 use std::ops::Deref;
 use std::sync::Arc;
 
 use crate::config::Config;
-use crate::table::column::{Column as TableColumn, ColumnType as TableColumnType, ColumnValue};
+use crate::table::aggregate::Aggregate;
+use crate::table::column::{try_parse_queried_column, AggregateColumn, Column as TableColumn, ColumnType as TableColumnType, ColumnValue};
 use crate::table::cursor::{AggregatedRow, Row};
 use crate::table::table::{QueryResult, TableDefinition};
 use crate::transport::shard::Shards;
@@ -16,16 +18,18 @@ use crate::transport::shard_op::create_table::CreateTable;
 use crate::transport::shard_op::insert::Insert;
 use crate::transport::shard_op::query::Query;
 
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct CreateTableRequest {
     name: String,
     columns: Vec<Column>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Column {
     name: String,
     ty: ColumnType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_ty: Option<ColumnType>,
 }
 
 impl From<TableColumn> for Column {
@@ -33,6 +37,7 @@ impl From<TableColumn> for Column {
         Self {
             name: value.name,
             ty: value.ty.into(),
+            source_ty: None,
         }
     }
 }
@@ -43,7 +48,7 @@ impl From<Column> for TableColumn {
     }
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ColumnType {
     Integer,
@@ -85,7 +90,7 @@ impl<'a> From<&'a ColumnValue> for ColumnType {
     }
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct InsertRequest {
     insert: Vec<String>,
     into: String,
@@ -113,7 +118,7 @@ impl InsertRequest {
     }
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct QueryRequest {
     select: Vec<String>,
     from: String,
@@ -121,27 +126,27 @@ pub struct QueryRequest {
     group_by: Option<Vec<String>>,
 }
 
-#[derive(Deserialize, Serialize)]
-pub struct Aggregate {
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AggregateData {
     value: serde_json::Value,
     components: Vec<serde_json::Value>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum QueryResponse {
     Empty {
         errors: Vec<String>,
     },
-    WithData {
-        columns: Vec<Column>,
-        data: Vec<Vec<serde_json::Value>>,
-    },
     WithAggregatedData {
         columns: Vec<Column>,
         aggregate_columns: Vec<Column>,
         data: Vec<Vec<serde_json::Value>>,
-        aggregates: Vec<Vec<Aggregate>>,
+        aggregates: Vec<Vec<AggregateData>>,
+    },
+    WithData {
+        columns: Vec<Column>,
+        data: Vec<Vec<serde_json::Value>>,
     },
 }
 
@@ -174,13 +179,15 @@ impl QueryResponse {
         data: Vec<Vec<serde_json::Value>>,
     ) -> QueryResult {
         let mut rows = vec![];
-        println!("RECEIVED DATA {:?}", data);
-        for entry in data {
+        for data_row in data {
             let Some(row) = Row::from_components(
                 // TODO: figure out if we need propagation of index_id and timestamp.
                 0,
                 0,
-                columns.iter().zip(entry.into_iter()).map(|(c, v)| Self::build_row_component(c, v)),
+                columns
+                    .iter()
+                    .zip(data_row.into_iter())
+                    .map(|(c, v)| Self::build_column_and_column_value(c, v)),
             ) else {
                 info!("Row skipped during conversion");
                 continue;
@@ -195,12 +202,32 @@ impl QueryResponse {
         columns: Vec<Column>,
         aggregate_columns: Vec<Column>,
         data: Vec<Vec<serde_json::Value>>,
-        aggregates: Vec<Vec<Aggregate>>,
+        aggregates: Vec<Vec<AggregateData>>,
     ) -> QueryResult {
-        QueryResult::AggregatedRows(vec![])
+        let mut aggregated_rows = vec![];
+
+        for (data_row, aggregates_row) in data.into_iter().zip(aggregates.into_iter()) {
+            let values = columns
+                .iter()
+                .zip(data_row.into_iter())
+                .map(|(c, v)| Self::build_column_and_column_value(c, v));
+
+            let aggregates = aggregate_columns
+                .iter()
+                .zip(aggregates_row.into_iter())
+                .map(|(c, v)| Self::build_aggregated_row_component(c, v));
+
+            let aggregated_row = AggregatedRow::new(values, aggregates);
+            aggregated_rows.push(aggregated_row);
+        }
+
+        QueryResult::AggregatedRows(aggregated_rows)
     }
-    
-    fn build_row_component(column: &Column, value: serde_json::Value) -> (TableColumn, ColumnValue) {
+
+    fn build_column_and_column_value(
+        column: &Column,
+        value: serde_json::Value,
+    ) -> (TableColumn, ColumnValue) {
         let table_column = column.clone().into();
         match (&column.ty, value) {
             (ColumnType::Integer, serde_json::Value::Number(number)) => {
@@ -223,6 +250,29 @@ impl QueryResponse {
         }
 
         (table_column, ColumnValue::Null)
+    }
+
+    fn build_aggregated_row_component(
+        column: &Column,
+        aggregate_data: AggregateData,
+    ) -> (AggregateColumn, ColumnValue, Vec<ColumnValue>) {
+        let (Some(aggregate), column_name) = try_parse_queried_column(&column.name).expect("Error while parsing column") else {
+            return (AggregateColumn(Aggregate::Count, column.clone().into()), ColumnValue::Null, vec![]);
+        };
+
+        // Since we don't have access to the original column on which the aggregate was run, we type
+        // it to null.
+        let original_column = Column {
+            name: column_name.to_string(),
+            ty: column.source_ty.as_ref().expect("An aggregate column must have a source type").clone(),
+            source_ty: None,
+        };
+        let (main_column, column_value) = Self::build_column_and_column_value(&original_column, aggregate_data.value);
+        let aggregate_column = AggregateColumn(aggregate, main_column);
+
+        let aggregate_components = aggregate_data.components.into_iter().map(|v| Self::build_column_and_column_value(column, v).1).collect();
+
+        (aggregate_column, column_value, aggregate_components)
     }
 
     pub fn empty() -> Self {
@@ -278,8 +328,7 @@ pub async fn insert(
         for request in requests {
             let insert = Insert::new(&request);
             if let Err(error) = shards.rr_unicast(insert).await {
-                info!("Error while inserting data in the shards: {}",
-                    error);
+                info!("Error while inserting data in the shards: {}", error);
                 return Json(format!(
                     "Error while inserting data in the shards: {}",
                     error
@@ -323,8 +372,7 @@ pub async fn query(
                 }
             }
             Err(error) => {
-                info!("Error while querying data from the shards: {}",
-                    error);
+                info!("Error while querying data from the shards: {}", error);
                 return Json(QueryResponse::empty());
             }
         }
@@ -388,9 +436,14 @@ fn serialize_aggregated_rows(aggregated_rows: Vec<AggregatedRow<ColumnValue>>) -
     let aggregate_columns = first_row
         .aggregate_columns()
         .into_iter()
-        .map(|(a, c)| Column {
-            name: a.into(),
-            ty: c.into(),
+        .map(|(a, c)| {
+            // We add the type of the column which was used to build the aggregate.
+            let source_ty = Some(a.1.ty.into());
+            Column {
+                name: a.into(),
+                ty: c.into(),
+                source_ty,
+            }
         })
         .collect();
 
@@ -421,7 +474,7 @@ fn serialize_rows_data(rows: Vec<Row<ColumnValue>>) -> Vec<Vec<serde_json::Value
 
 fn serialize_aggregated_rows_data(
     aggregated_rows: Vec<AggregatedRow<ColumnValue>>,
-) -> (Vec<Vec<serde_json::Value>>, Vec<Vec<Aggregate>>) {
+) -> (Vec<Vec<serde_json::Value>>, Vec<Vec<AggregateData>>) {
     let mut serialized_data = Vec::with_capacity(aggregated_rows.len());
     let mut serialized_aggregates = Vec::with_capacity(aggregated_rows.len());
 
@@ -436,7 +489,7 @@ fn serialize_aggregated_rows_data(
 
         let mut serialized_aggregate_values = Vec::with_capacity(aggregate_values.len());
         for (aggregate_value, aggregate_components) in aggregate_values {
-            let serialized_aggregate = Aggregate {
+            let serialized_aggregate = AggregateData {
                 value: aggregate_value.into(),
                 components: aggregate_components.into_iter().map(|a| a.into()).collect(),
             };
