@@ -274,7 +274,15 @@ impl Table {
 
                 // We loop and try to seek through the next column.
                 loop {
-                    let column_row_component = column_cursor.read::<ColumnValue>().await?;
+                    let mut column_row_component = column_cursor.read::<ColumnValue>().await;
+                    // In case we reached the end of the file, we skip over the entire column.
+                    if let Err(error) = &column_row_component {
+                        if error.kind() == ErrorKind::UnexpectedEof {
+                            break;
+                        }
+                    }
+                    
+                    let column_row_component = column_row_component?;
                     let same_row = column_row_component.same_row(&index_row_component);
                     let Some(column_value) = column_row_component.value else {
                         break;
@@ -297,6 +305,8 @@ impl Table {
                     }
                 }
             }
+            
+            println!("COMPONENTS {:?}", row_components);
 
             // We build the row from all the row components.
             let row = Row::from_components(
