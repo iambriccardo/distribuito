@@ -195,11 +195,7 @@ impl ColumnCursor {
                 .unwrap(),
         );
         let Some(column) = &self.column else {
-            return Ok(RowComponent::new(
-                index_id,
-                timestamp,
-                None,
-            ));
+            return Ok(RowComponent::new(index_id, timestamp, None));
         };
 
         let data = buffer[ColumnType::Integer.size() * 2..].to_vec();
