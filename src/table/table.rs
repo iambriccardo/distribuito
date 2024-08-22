@@ -1,4 +1,3 @@
-use axum::extract::Query;
 use log::info;
 use serde_json::Value;
 use std::collections::hash_map::Entry;
@@ -19,7 +18,6 @@ use crate::table::column::{
     Column, ColumnType, ColumnValue,
 };
 use crate::table::cursor::{AggregatedRow, ColumnCursor, IndexCursor, Row};
-use crate::transport::api::QueryResponse;
 
 fn add_extension(file_name: &str) -> String {
     format!("{}.dsto", file_name)
@@ -274,7 +272,7 @@ impl Table {
 
                 // We loop and try to seek through the next column.
                 loop {
-                    let mut column_row_component = column_cursor.read::<ColumnValue>().await;
+                    let column_row_component = column_cursor.read::<ColumnValue>().await;
                     // In case we reached the end of the file, we skip over the entire column.
                     if let Err(error) = &column_row_component {
                         if error.kind() == ErrorKind::UnexpectedEof {
@@ -305,8 +303,6 @@ impl Table {
                     }
                 }
             }
-            
-            println!("COMPONENTS {:?}", row_components);
 
             // We build the row from all the row components.
             let row = Row::from_components(
@@ -491,13 +487,9 @@ impl QueryResult {
     ) -> Vec<AggregatedRow<ColumnValue>> {
         let mut groups: HashMap<GroupKey<ColumnValue>, GroupValue<ColumnValue>> = HashMap::new();
 
-        println!("LEFT {:?}", left);
-        println!("RIGHT {:?}", right);
-
         // TODO: reduce duplication.
         for left_row in left {
             let (group_key, group_value) = left_row.to_group();
-            println!("GROUP VALUE {:?}", group_value);
             match groups.entry(group_key) {
                 Entry::Occupied(mut entry) => {
                     entry.get_mut().merge(group_value);
@@ -508,11 +500,8 @@ impl QueryResult {
             }
         }
 
-        println!("-");
-
         for right_row in right {
             let (group_key, group_value) = right_row.to_group();
-            println!("GROUP VALUE {:?}", group_value);
             match groups.entry(group_key) {
                 Entry::Occupied(mut entry) => {
                     entry.get_mut().merge(group_value);

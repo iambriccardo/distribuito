@@ -182,7 +182,7 @@ where
             let Some(matching_aggregate_position) = other
                 .aggregates
                 .iter()
-                .position(|(a, c)| *aggregate_column == *a)
+                .position(|(a, _)| *aggregate_column == *a)
             else {
                 continue;
             };

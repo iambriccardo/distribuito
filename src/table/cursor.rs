@@ -49,7 +49,7 @@ where
         let group_value = GroupValue::from_aggregates(
             self.aggregates
                 .into_iter()
-                .map(|(a, v, c)| (a, c))
+                .map(|(a, _, c)| (a, c))
                 .collect(),
         );
 

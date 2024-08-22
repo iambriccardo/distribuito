@@ -30,7 +30,7 @@ fn config_path() -> tokio::io::Result<PathBuf> {
 
 #[tokio::main]
 async fn main() {
-    std_logger::Config::logfmt().init();
+    tracing_subscriber::fmt::init();
 
     let config_path = config_path().unwrap();
     let config = Config::from_file(config_path).await.unwrap();
