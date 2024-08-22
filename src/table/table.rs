@@ -257,24 +257,28 @@ impl Table {
         column_files: Vec<File>,
     ) -> io::Result<Vec<Row<ColumnValue>>> {
         let mut index_cursor = IndexCursor::new(self.index.file.try_clone().await?);
-        let mut column_cursors: Vec<ColumnCursor> = columns
+        // TODO: for the search algorithm we split the columns in the columns we are filtering and
+        //  the ones we are not. Then we take all the columns we are filtering by and load them into
+        //  memory, if the predicate is true, we continue reading the remaining columns, if not,
+        //  we skip over the row entirely.
+        let (mut filterable_column_cursors, mut column_cursors): (Vec<(ColumnCursor, bool)>, Vec<(ColumnCursor, bool)>) = columns
             .into_iter()
             .zip(column_files.into_iter())
-            .map(|(c, f)| ColumnCursor::new(c.clone(), f))
-            .collect();
+            .map(|(c, f)| (ColumnCursor::new(c.clone(), f), true))
+            .partition(|(c, p)| *p);;
 
         let mut rows = vec![];
         while let Ok(index_row_component) = index_cursor.read::<ColumnValue>().await {
             let mut row_components: Vec<(Column, ColumnValue)> =
                 Vec::with_capacity(column_cursors.len());
 
-            for (column_index, column_cursor) in column_cursors.iter_mut().enumerate() {
+            for (column_index, column_cursor) in filterable_column_cursors.iter_mut().enumerate() {
                 // By default, we assume that the column we are reading is null.
-                row_components.push((column_cursor.column.clone(), ColumnValue::Null));
+                row_components.push((column_cursor.0.column.clone(), ColumnValue::Null));
 
                 // We loop and try to seek through the next column.
                 loop {
-                    let mut column_row_component = column_cursor.read::<ColumnValue>().await;
+                    let mut column_row_component = column_cursor.0.read::<ColumnValue>().await;
                     // In case we reached the end of the file, we skip over the entire column.
                     if let Err(error) = &column_row_component {
                         if error.kind() == ErrorKind::UnexpectedEof {
@@ -295,18 +299,16 @@ impl Table {
                     // - Otherwise, we just advance the cursor and try to get the next element with
                     // the same index.
                     if same_row {
-                        row_components[column_index] = (column_cursor.column.clone(), column_value);
-                        column_cursor.advance();
+                        row_components[column_index] = (column_cursor.0.column.clone(), column_value);
+                        column_cursor.0.advance();
                         break;
                     } else if column_row_component.index_id > index_row_component.index_id {
                         break;
                     } else {
-                        column_cursor.advance();
+                        column_cursor.0.advance();
                     }
                 }
             }
-            
-            println!("COMPONENTS {:?}", row_components);
 
             // We build the row from all the row components.
             let row = Row::from_components(
