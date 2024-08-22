@@ -1,14 +1,14 @@
 use std::fmt::Debug;
 use std::hash::Hash;
+use std::io::SeekFrom;
 use std::ops::Div;
 
-use tokio::fs::File;
-use tokio::io;
-
-use crate::io::file::seek;
 use crate::table::aggregate::{Aggregable, GroupKey, GroupValue};
 use crate::table::column::{index_and_timestamp_size, AggregateColumn, Column, ColumnType};
 use crate::table::FromDisk;
+use tokio::fs::File;
+use tokio::io;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, BufStream};
 
 #[derive(Debug)]
 pub struct AggregatedRow<T>
@@ -172,21 +172,12 @@ where
 
 pub struct ColumnCursor {
     pub column: Column,
-    file: File,
-    position: u64,
-    size: usize,
+    file: BufStream<File>,
 }
 
 impl ColumnCursor {
-    pub fn new(column: Column, file: File) -> Self {
-        // We compute the total size of the column data, since we skip data with such size.
-        let size = index_and_timestamp_size() + column.size();
-        Self {
-            column,
-            file,
-            position: 0,
-            size,
-        }
+    pub fn new(column: Column, file: BufStream<File>) -> Self {
+        Self { column, file }
     }
 
     pub async fn read<T>(&mut self) -> io::Result<RowComponent<T>>
@@ -194,19 +185,18 @@ impl ColumnCursor {
         T: FromDisk + Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
     {
         let mut index_id = [0u8; ColumnType::Integer.size()];
-        let position = self.seek_position();
-        seek(&mut self.file, position, &mut index_id).await?;
+        self.file.read_exact(&mut index_id).await?;
 
         let mut timestamp = [0u8; ColumnType::Integer.size()];
-        let position = position + (ColumnType::Integer.size() as u64);
-        seek(&mut self.file, position, &mut timestamp).await?;
+        self.file.read_exact(&mut timestamp).await?;
 
         let mut data: Vec<u8> = Vec::with_capacity(self.column.size());
         for _ in 0..self.column.size() {
             data.push(0u8);
         }
-        let position = position + (ColumnType::Integer.size() as u64);
-        seek(&mut self.file, position, &mut data[..self.column.size()]).await?;
+        self.file
+            .read_exact(&mut data[..self.column.size()])
+            .await?;
 
         Ok(RowComponent::new(
             u64::from_le_bytes(index_id),
@@ -215,27 +205,21 @@ impl ColumnCursor {
         ))
     }
 
-    pub fn advance(&mut self) {
-        self.position += 1
-    }
-
-    fn seek_position(&self) -> u64 {
-        self.position * (self.size as u64)
+    pub async fn undo(&mut self) -> io::Result<()> {
+        // We compute the total size of the column data, since we skip data with such size.
+        let size = (index_and_timestamp_size() + self.column.size()) as i64;
+        self.file.seek(SeekFrom::Current(-size)).await.map(|_| ())
     }
 }
 
 pub struct IndexCursor {
-    file: File,
-    position: u64,
-    size: usize,
+    file: BufStream<File>,
 }
 
 impl IndexCursor {
     pub fn new(file: File) -> Self {
         Self {
-            file,
-            position: 0,
-            size: index_and_timestamp_size(),
+            file: BufStream::new(file),
         }
     }
 
@@ -244,25 +228,15 @@ impl IndexCursor {
         T: FromDisk + Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
     {
         let mut index_id = [0u8; ColumnType::Integer.size()];
-        let position = self.seek_position();
-        seek(&mut self.file, position, &mut index_id).await?;
+        self.file.read_exact(&mut index_id).await?;
 
         let mut timestamp = [0u8; ColumnType::Integer.size()];
-        let position = self.seek_position() + (ColumnType::Integer.size() as u64);
-        seek(&mut self.file, position, &mut timestamp).await?;
+        self.file.read_exact(&mut timestamp).await?;
 
         Ok(RowComponent::new(
             u64::from_le_bytes(index_id),
             u64::from_le_bytes(timestamp),
             None,
         ))
-    }
-
-    pub fn advance(&mut self) {
-        self.position += 1
-    }
-
-    fn seek_position(&self) -> u64 {
-        self.position * (self.size as u64)
     }
 }

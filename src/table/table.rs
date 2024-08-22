@@ -1,23 +1,23 @@
-use log::info;
-use serde_json::Value;
-use std::collections::hash_map::Entry;
-use std::collections::HashMap;
-use std::io::{Error, ErrorKind};
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::u64;
-use tokio::fs::{create_dir_all, File};
-use tokio::io;
-
 use crate::config::Config;
-use crate::io::file::{create_and_open_file, create_file, seek_or, write, write_end};
+use crate::io::file::{create_and_open_file, create_file, read_or_write};
 use crate::table::aggregate::{GroupKey, GroupValue};
 use crate::table::column::{
     get_columns, parse_and_validate_columns, parse_and_validate_queried_columns, AggregateColumn,
     Column, ColumnType, ColumnValue,
 };
 use crate::table::cursor::{AggregatedRow, ColumnCursor, IndexCursor, Row};
+use log::info;
+use serde_json::Value;
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
+use std::io::{Error, ErrorKind, SeekFrom};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::u64;
+use tokio::fs::{create_dir_all, File};
+use tokio::io;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufStream};
 
 fn add_extension(file_name: &str) -> String {
     format!("{}.dsto", file_name)
@@ -108,26 +108,22 @@ impl TableDefinition {
 /// - 8 bytes for storing the next index value
 #[derive(Debug)]
 pub struct TableStats {
-    file: File,
+    file: BufStream<File>,
     row_count: u64,
     next_index: u64,
 }
 
 impl TableStats {
-    pub async fn from_file(mut file: File) -> io::Result<Self> {
+    pub async fn from_file(file: File) -> io::Result<Self> {
+        let mut file = BufStream::new(file);
+
         // We try to read the row count or default it to 0.
         let mut row_count = [0u8; ColumnType::Integer.size()];
-        seek_or(&mut file, 0, &mut row_count, &u64::to_le_bytes(0)).await?;
+        read_or_write(&mut file, &mut row_count, &u64::to_le_bytes(0)).await?;
 
         // We try to read the next index or default it to 0.
         let mut next_index = [0u8; ColumnType::Integer.size()];
-        seek_or(
-            &mut file,
-            ColumnType::Integer.size() as u64,
-            &mut next_index,
-            &u64::to_le_bytes(0),
-        )
-        .await?;
+        read_or_write(&mut file, &mut next_index, &u64::to_le_bytes(0)).await?;
 
         Ok(TableStats {
             file,
@@ -140,13 +136,14 @@ impl TableStats {
         self.row_count += 1;
         self.next_index += 1;
 
-        write(&mut self.file, 0, &u64::to_le_bytes(self.row_count)).await?;
-        write(
-            &mut self.file,
-            ColumnType::Integer.size() as u64,
-            &u64::to_le_bytes(self.row_count),
-        )
-        .await?;
+        self.file.seek(SeekFrom::Start(0)).await?;
+        self.file
+            .write_all(&u64::to_le_bytes(self.row_count))
+            .await?;
+        self.file
+            .write_all(&u64::to_le_bytes(self.next_index))
+            .await?;
+        self.file.flush().await?;
 
         Ok(())
     }
@@ -154,19 +151,33 @@ impl TableStats {
 
 #[derive(Debug)]
 pub struct TableIndex {
-    file: File,
+    file: BufStream<File>,
 }
 
 impl TableIndex {
     pub fn new(file: File) -> Self {
-        Self { file }
+        Self {
+            file: BufStream::new(file),
+        }
+    }
+
+    pub async fn seek_end(&mut self) -> io::Result<()> {
+        self.file.seek(SeekFrom::End(0)).await?;
+
+        Ok(())
     }
 
     pub async fn append(&mut self, timestamp: u64, stats: &TableStats) -> io::Result<()> {
-        write_end(&mut self.file, &u64::to_le_bytes(stats.next_index)).await?;
-        write_end(&mut self.file, &u64::to_le_bytes(timestamp)).await?;
+        self.file
+            .write_all(&u64::to_le_bytes(stats.next_index))
+            .await?;
+        self.file.write_all(&u64::to_le_bytes(timestamp)).await?;
 
         Ok(())
+    }
+
+    pub async fn flush(&mut self) -> io::Result<()> {
+        self.file.flush().await
     }
 }
 
@@ -194,6 +205,9 @@ impl Table {
             .unwrap()
             .as_secs();
 
+        // We position ourselves at the start of the index.
+        self.index.seek_end().await?;
+
         // For each value we insert into the file.
         for value in values {
             if value.len() != columns.len() {
@@ -218,6 +232,8 @@ impl Table {
             // Once insertion has been done, we update the table stats and persist them.
             self.stats.increment().await?;
         }
+
+        self.index.flush().await?;
 
         Ok(())
     }
@@ -252,9 +268,9 @@ impl Table {
     async fn query_values(
         &mut self,
         columns: &Vec<Column>,
-        column_files: Vec<File>,
+        column_files: Vec<BufStream<File>>,
     ) -> io::Result<Vec<Row<ColumnValue>>> {
-        let mut index_cursor = IndexCursor::new(self.index.file.try_clone().await?);
+        let mut index_cursor = IndexCursor::new(self.index.file.get_ref().try_clone().await?);
         let mut column_cursors: Vec<ColumnCursor> = columns
             .into_iter()
             .zip(column_files.into_iter())
@@ -294,12 +310,12 @@ impl Table {
                     // the same index.
                     if same_row {
                         row_components[column_index] = (column_cursor.column.clone(), column_value);
-                        column_cursor.advance();
                         break;
                     } else if column_row_component.index_id > index_row_component.index_id {
+                        // If this row has higher index id, we want to undo the read so that we
+                        // can read it again for the next index.
+                        column_cursor.undo().await?;
                         break;
-                    } else {
-                        column_cursor.advance();
                     }
                 }
             }
@@ -313,9 +329,6 @@ impl Table {
             if let Some(row) = row {
                 rows.push(row);
             }
-
-            // We move onto the next index.
-            index_cursor.advance();
         }
 
         Ok(rows)
@@ -350,7 +363,7 @@ impl Table {
         &mut self,
         timestamp: u64,
         column: &Column,
-        column_file: &mut File,
+        column_file: &mut BufStream<File>,
         value: serde_json::Value,
     ) -> io::Result<()> {
         // We write the data into the specific column.
@@ -423,18 +436,22 @@ impl Table {
 
     async fn write_value(
         &self,
-        column_file: &mut File,
+        column_file: &mut BufStream<File>,
         timestamp: u64,
         data: &[u8],
     ) -> io::Result<()> {
-        write_end(column_file, &u64::to_le_bytes(self.stats.next_index)).await?;
-        write_end(column_file, &u64::to_le_bytes(timestamp)).await?;
-        write_end(column_file, data).await?;
+        column_file.seek(SeekFrom::End(0)).await?;
+        column_file
+            .write_all(&u64::to_le_bytes(self.stats.next_index))
+            .await?;
+        column_file.write_all(&u64::to_le_bytes(timestamp)).await?;
+        column_file.write_all(data).await?;
+        column_file.flush().await?;
 
         Ok(())
     }
 
-    async fn open_column_files(&self, columns: &Vec<Column>) -> io::Result<Vec<File>> {
+    async fn open_column_files(&self, columns: &Vec<Column>) -> io::Result<Vec<BufStream<File>>> {
         // We open all columns files since we want to append to each of them.
         let table_path = build_table_path(&self.definition.config, &self.definition.name);
 
@@ -444,7 +461,7 @@ impl Table {
             let column_file =
                 create_and_open_file(&add_extension(&column_file_name), &table_path).await?;
 
-            column_files.push(column_file);
+            column_files.push(BufStream::new(column_file));
         }
 
         Ok(column_files)
