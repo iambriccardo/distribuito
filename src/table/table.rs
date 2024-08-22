@@ -7,7 +7,7 @@ use crate::table::column::{
     get_columns, parse_and_validate_columns, parse_and_validate_queried_columns, AggregateColumn,
     Column, ColumnType, ColumnValue,
 };
-use crate::table::cursor::{AggregatedRow, ColumnCursor, IndexCursor, Row};
+use crate::table::cursor::{AggregatedRow, ColumnCursor, Row};
 use log::info;
 use serde_json::Value;
 use std::collections::hash_map::Entry;
@@ -221,7 +221,7 @@ impl Table {
 
             // We add an entry in the index for each set of columns.
             self.index.append(timestamp, &self.stats).await?;
-            
+
             for ((inner_value, column), column_file) in value
                 .into_iter()
                 .zip(columns.iter())
@@ -276,11 +276,12 @@ impl Table {
         columns: &Vec<Column>,
         column_files: Vec<BufStream<File>>,
     ) -> io::Result<Vec<Row<ColumnValue>>> {
-        let mut index_cursor = IndexCursor::new(self.index.file.get_ref().try_clone().await?);
+        let index_file = self.index.file.get_ref().try_clone().await?;
+        let mut index_cursor = ColumnCursor::new(None, BufStream::new(index_file));
         let mut column_cursors: Vec<ColumnCursor> = columns
             .into_iter()
             .zip(column_files.into_iter())
-            .map(|(c, f)| ColumnCursor::new(c.clone(), f))
+            .map(|(c, f)| ColumnCursor::new(Some(c.clone()), f))
             .collect();
 
         let mut rows = vec![];
@@ -289,8 +290,13 @@ impl Table {
                 Vec::with_capacity(column_cursors.len());
 
             for (column_index, column_cursor) in column_cursors.iter_mut().enumerate() {
+                let Some(column) = &column_cursor.column else {
+                    info!("Column cursor doesn't have a column, skipping entire row");
+                    break;
+                };
+
                 // By default, we assume that the column we are reading is null.
-                row_components.push((column_cursor.column.clone(), ColumnValue::Null));
+                row_components.push((column.clone(), ColumnValue::Null));
 
                 // We loop and try to seek through the next column.
                 loop {
@@ -315,7 +321,7 @@ impl Table {
                     // - Otherwise, we just advance the cursor and try to get the next element with
                     // the same index.
                     if same_row {
-                        row_components[column_index] = (column_cursor.column.clone(), column_value);
+                        (*row_components.get_mut(column_index).unwrap()).1 = column_value;
                         break;
                     } else if column_row_component.index_id > index_row_component.index_id {
                         // If this row has higher index id, we want to undo the read so that we

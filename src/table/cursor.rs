@@ -171,12 +171,12 @@ where
 }
 
 pub struct ColumnCursor {
-    pub column: Column,
+    pub column: Option<Column>,
     file: BufStream<File>,
 }
 
 impl ColumnCursor {
-    pub fn new(column: Column, file: BufStream<File>) -> Self {
+    pub fn new(column: Option<Column>, file: BufStream<File>) -> Self {
         Self { column, file }
     }
 
@@ -184,59 +184,39 @@ impl ColumnCursor {
     where
         T: FromDisk + Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
     {
-        let mut index_id = [0u8; ColumnType::Integer.size()];
-        self.file.read_exact(&mut index_id).await?;
+        let total_size = ColumnType::Integer.size() * 2 + self.column_size();
+        let mut buffer = vec![0u8; total_size];
+        self.file.read_exact(&mut buffer).await?;
 
-        let mut timestamp = [0u8; ColumnType::Integer.size()];
-        self.file.read_exact(&mut timestamp).await?;
+        let index_id = u64::from_le_bytes(buffer[..ColumnType::Integer.size()].try_into().unwrap());
+        let timestamp = u64::from_le_bytes(
+            buffer[ColumnType::Integer.size()..ColumnType::Integer.size() * 2]
+                .try_into()
+                .unwrap(),
+        );
+        let Some(column) = &self.column else {
+            return Ok(RowComponent::new(
+                index_id,
+                timestamp,
+                None,
+            ));
+        };
 
-        let mut data: Vec<u8> = Vec::with_capacity(self.column.size());
-        for _ in 0..self.column.size() {
-            data.push(0u8);
-        }
-        self.file
-            .read_exact(&mut data[..self.column.size()])
-            .await?;
-
+        let data = buffer[ColumnType::Integer.size() * 2..].to_vec();
         Ok(RowComponent::new(
-            u64::from_le_bytes(index_id),
-            u64::from_le_bytes(timestamp),
-            Some(T::from(self.column.ty, data)),
+            index_id,
+            timestamp,
+            Some(T::from(column.ty, data)),
         ))
     }
 
     pub async fn undo(&mut self) -> io::Result<()> {
         // We compute the total size of the column data, since we skip data with such size.
-        let size = (index_and_timestamp_size() + self.column.size()) as i64;
+        let size = (index_and_timestamp_size() + self.column_size()) as i64;
         self.file.seek(SeekFrom::Current(-size)).await.map(|_| ())
     }
-}
 
-pub struct IndexCursor {
-    file: BufStream<File>,
-}
-
-impl IndexCursor {
-    pub fn new(file: File) -> Self {
-        Self {
-            file: BufStream::new(file),
-        }
-    }
-
-    pub async fn read<T>(&mut self) -> io::Result<RowComponent<T>>
-    where
-        T: FromDisk + Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
-    {
-        let mut index_id = [0u8; ColumnType::Integer.size()];
-        self.file.read_exact(&mut index_id).await?;
-
-        let mut timestamp = [0u8; ColumnType::Integer.size()];
-        self.file.read_exact(&mut timestamp).await?;
-
-        Ok(RowComponent::new(
-            u64::from_le_bytes(index_id),
-            u64::from_le_bytes(timestamp),
-            None,
-        ))
+    fn column_size(&self) -> usize {
+        self.column.as_ref().map_or(0, |c| c.size())
     }
 }
