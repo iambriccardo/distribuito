@@ -26,7 +26,17 @@ pub async fn create_and_open_file<P: AsRef<Path>>(file_name: &str, path: P) -> i
     Ok(file)
 }
 
-pub async fn read_or_write(
+pub async fn open_append_file<P: AsRef<Path>>(file_name: &str, path: P) -> io::Result<File> {
+    let file_path = path.as_ref().join(file_name);
+    File::options().append(true).open(file_path).await
+}
+
+pub async fn open_read_file<P: AsRef<Path>>(file_name: &str, path: P) -> io::Result<File> {
+    let file_path = path.as_ref().join(file_name);
+    File::options().read(true).open(file_path).await
+}
+
+pub async fn read_or(
     file: &mut BufStream<File>,
     buffer: &mut [u8],
     default: &[u8],

@@ -1,5 +1,7 @@
 use crate::config::Config;
-use crate::io::file::{create_and_open_file, create_file, read_or_write};
+use crate::io::file::{
+    create_and_open_file, create_file, open_append_file, open_read_file, read_or,
+};
 use crate::table::aggregate::{GroupKey, GroupValue};
 use crate::table::column::{
     get_columns, parse_and_validate_columns, parse_and_validate_queried_columns, AggregateColumn,
@@ -119,11 +121,11 @@ impl TableStats {
 
         // We try to read the row count or default it to 0.
         let mut row_count = [0u8; ColumnType::Integer.size()];
-        read_or_write(&mut file, &mut row_count, &u64::to_le_bytes(0)).await?;
+        read_or(&mut file, &mut row_count, &u64::to_le_bytes(0)).await?;
 
         // We try to read the next index or default it to 0.
         let mut next_index = [0u8; ColumnType::Integer.size()];
-        read_or_write(&mut file, &mut next_index, &u64::to_le_bytes(0)).await?;
+        read_or(&mut file, &mut next_index, &u64::to_le_bytes(0)).await?;
 
         Ok(TableStats {
             file,
@@ -198,7 +200,7 @@ impl Table {
         values: Vec<Vec<serde_json::Value>>,
     ) -> io::Result<()> {
         let columns = parse_and_validate_columns(&self.definition.columns, &columns)?;
-        let mut column_files = self.open_column_files(&columns).await?;
+        let mut column_files = self.open_column_files(&columns, false).await?;
 
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -219,7 +221,7 @@ impl Table {
 
             // We add an entry in the index for each set of columns.
             self.index.append(timestamp, &self.stats).await?;
-
+            
             for ((inner_value, column), column_file) in value
                 .into_iter()
                 .zip(columns.iter())
@@ -233,7 +235,11 @@ impl Table {
             self.stats.increment().await?;
         }
 
+        // We flush all files to make sure data is flushed to disk from the buffer.
         self.index.flush().await?;
+        for column_file in column_files.iter_mut() {
+            column_file.flush().await?;
+        }
 
         Ok(())
     }
@@ -251,7 +257,7 @@ impl Table {
             &group_by_columns.unwrap_or(vec![]),
         )?;
         // TODO: add group by validation to make sure that the selected and grouped columns are the same.
-        let column_files = self.open_column_files(&columns).await?;
+        let column_files = self.open_column_files(&columns, true).await?;
 
         // We query the rows and early return in case no aggregates are supplied.
         let rows = self.query_values(&columns, column_files).await?;
@@ -440,26 +446,31 @@ impl Table {
         timestamp: u64,
         data: &[u8],
     ) -> io::Result<()> {
-        column_file.seek(SeekFrom::End(0)).await?;
         column_file
             .write_all(&u64::to_le_bytes(self.stats.next_index))
             .await?;
         column_file.write_all(&u64::to_le_bytes(timestamp)).await?;
         column_file.write_all(data).await?;
-        column_file.flush().await?;
 
         Ok(())
     }
 
-    async fn open_column_files(&self, columns: &Vec<Column>) -> io::Result<Vec<BufStream<File>>> {
+    async fn open_column_files(
+        &self,
+        columns: &Vec<Column>,
+        read_only: bool,
+    ) -> io::Result<Vec<BufStream<File>>> {
         // We open all columns files since we want to append to each of them.
         let table_path = build_table_path(&self.definition.config, &self.definition.name);
 
         let mut column_files = vec![];
         for column in columns {
             let column_file_name: String = column.into();
-            let column_file =
-                create_and_open_file(&add_extension(&column_file_name), &table_path).await?;
+            let column_file = if read_only {
+                open_read_file(&add_extension(&column_file_name), &table_path).await?
+            } else {
+                open_append_file(&add_extension(&column_file_name), &table_path).await?
+            };
 
             column_files.push(BufStream::new(column_file));
         }
