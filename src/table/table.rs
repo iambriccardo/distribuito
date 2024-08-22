@@ -127,7 +127,7 @@ impl TableStats {
             &mut next_index,
             &u64::to_le_bytes(0),
         )
-            .await?;
+        .await?;
 
         Ok(TableStats {
             file,
@@ -146,7 +146,7 @@ impl TableStats {
             ColumnType::Integer.size() as u64,
             &u64::to_le_bytes(self.row_count),
         )
-            .await?;
+        .await?;
 
         Ok(())
     }
@@ -279,7 +279,7 @@ impl Table {
                             break;
                         }
                     }
-                    
+
                     let column_row_component = column_row_component?;
                     let same_row = column_row_component.same_row(&index_row_component);
                     let Some(column_value) = column_row_component.value else {
@@ -375,14 +375,14 @@ impl Table {
                         timestamp,
                         &i64::to_le_bytes(number.as_i64().unwrap()),
                     )
-                        .await?;
+                    .await?;
                 } else if number.is_f64() {
                     self.write_value(
                         column_file,
                         timestamp,
                         &f64::to_le_bytes(number.as_f64().unwrap()),
                     )
-                        .await?;
+                    .await?;
                 } else {
                     return Err(Error::new(
                         ErrorKind::Unsupported,

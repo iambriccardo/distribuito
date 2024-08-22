@@ -13,7 +13,7 @@ use crate::table::FromDisk;
 #[derive(Debug)]
 pub struct AggregatedRow<T>
 where
-    T: Aggregable<T> + Div<Output=T> + Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
+    T: Aggregable<T> + Div<Output = T> + Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
 {
     values: Vec<(Column, T)>,
     aggregates: Vec<(AggregateColumn, T, Vec<T>)>,
@@ -21,9 +21,12 @@ where
 
 impl<T> AggregatedRow<T>
 where
-    T: Aggregable<T> + Div<Output=T> + Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
+    T: Aggregable<T> + Div<Output = T> + Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
 {
-    pub fn new(values: impl IntoIterator<Item=(Column, T)>, aggregates: impl IntoIterator<Item=(AggregateColumn, T, Vec<T>)>) -> Self {
+    pub fn new(
+        values: impl IntoIterator<Item = (Column, T)>,
+        aggregates: impl IntoIterator<Item = (AggregateColumn, T, Vec<T>)>,
+    ) -> Self {
         Self {
             values: values.into_iter().collect(),
             aggregates: aggregates.into_iter().collect(),
@@ -100,7 +103,7 @@ where
     pub fn from_components(
         index_id: u64,
         timestamp: u64,
-        row_components: impl IntoIterator<Item=(Column, T)>,
+        row_components: impl IntoIterator<Item = (Column, T)>,
     ) -> Option<Self> {
         Some(Self {
             index_id,

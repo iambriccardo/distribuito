@@ -2,13 +2,16 @@ use axum::extract::State;
 use axum::Json;
 use log::info;
 use serde::{Deserialize, Serialize};
-use serde_json::{Number};
+use serde_json::Number;
 use std::ops::Deref;
 use std::sync::Arc;
 
 use crate::config::Config;
 use crate::table::aggregate::Aggregate;
-use crate::table::column::{try_parse_queried_column, AggregateColumn, Column as TableColumn, ColumnType as TableColumnType, ColumnValue};
+use crate::table::column::{
+    try_parse_queried_column, AggregateColumn, Column as TableColumn,
+    ColumnType as TableColumnType, ColumnValue,
+};
 use crate::table::cursor::{AggregatedRow, Row};
 use crate::table::table::{QueryResult, TableDefinition};
 use crate::transport::shard::Shards;
@@ -254,21 +257,36 @@ impl QueryResponse {
         column: &Column,
         aggregate_data: AggregateData,
     ) -> (AggregateColumn, ColumnValue, Vec<ColumnValue>) {
-        let (Some(aggregate), column_name) = try_parse_queried_column(&column.name).expect("Error while parsing column") else {
-            return (AggregateColumn(Aggregate::Count, column.clone().into()), ColumnValue::Null, vec![]);
+        let (Some(aggregate), column_name) =
+            try_parse_queried_column(&column.name).expect("Error while parsing column")
+        else {
+            return (
+                AggregateColumn(Aggregate::Count, column.clone().into()),
+                ColumnValue::Null,
+                vec![],
+            );
         };
 
         // Since we don't have access to the original column on which the aggregate was run, we type
         // it to null.
         let original_column = Column {
             name: column_name.to_string(),
-            ty: column.source_ty.as_ref().expect("An aggregate column must have a source type").clone(),
+            ty: column
+                .source_ty
+                .as_ref()
+                .expect("An aggregate column must have a source type")
+                .clone(),
             source_ty: None,
         };
-        let (main_column, column_value) = Self::build_column_and_column_value(&original_column, aggregate_data.value);
+        let (main_column, column_value) =
+            Self::build_column_and_column_value(&original_column, aggregate_data.value);
         let aggregate_column = AggregateColumn(aggregate, main_column);
 
-        let aggregate_components = aggregate_data.components.into_iter().map(|v| Self::build_column_and_column_value(column, v).1).collect();
+        let aggregate_components = aggregate_data
+            .components
+            .into_iter()
+            .map(|v| Self::build_column_and_column_value(column, v).1)
+            .collect();
 
         (aggregate_column, column_value, aggregate_components)
     }

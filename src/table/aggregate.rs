@@ -44,7 +44,7 @@ pub enum MergeOp {
 #[derive(Debug)]
 pub enum AggregateComponents<T>
 where
-    T: Aggregable<T> + Div<Output=T> + Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
+    T: Aggregable<T> + Div<Output = T> + Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
 {
     Count(T),
     Sum(T),
@@ -53,7 +53,7 @@ where
 
 impl<T> AggregateComponents<T>
 where
-    T: Aggregable<T> + Div<Output=T> + Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
+    T: Aggregable<T> + Div<Output = T> + Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
 {
     pub fn new(aggregate_column: &AggregateColumn) -> Self {
         match aggregate_column.0 {
@@ -135,14 +135,14 @@ where
 #[derive(Debug)]
 pub struct GroupValue<T>
 where
-    T: Aggregable<T> + Div<Output=T> + Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
+    T: Aggregable<T> + Div<Output = T> + Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
 {
     pub aggregates: Vec<(AggregateColumn, AggregateComponents<T>)>,
 }
 
 impl<T> GroupValue<T>
 where
-    T: Aggregable<T> + Div<Output=T> + Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
+    T: Aggregable<T> + Div<Output = T> + Debug + Clone + Ord + PartialOrd + Eq + PartialEq + Hash,
 {
     pub fn new(aggregate_columns: Vec<AggregateColumn>) -> Self {
         Self {
