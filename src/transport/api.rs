@@ -501,10 +501,6 @@ pub async fn query(
 }
 
 fn serialize_query_result(query_result: QueryResult) -> QueryResponse {
-    if query_result.is_empty() {
-        return QueryResponse::empty();
-    }
-
     match query_result {
         QueryResult::Rows(rows) => serialize_rows(rows),
         QueryResult::AggregatedRows(aggregated_rows) => serialize_aggregated_rows(aggregated_rows),

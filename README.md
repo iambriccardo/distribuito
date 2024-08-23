@@ -11,10 +11,9 @@ internal hackweek, a week-long hackathon where Sentry employees can work on what
 This project is intended to be a playground for me to learn about database design and implementation. Currently, the
 implementation lacks many features:
 
-- The distributed query execution engine.
-- All the transport layer between shards.
 - Ability to filter by predicates.
 - Ability to order by.
+- Ability to express partitioning of data by columns.
 
 I hope to be able to finish all the distributed query execution to make the project presentable.
 
