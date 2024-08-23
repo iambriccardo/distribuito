@@ -3,6 +3,7 @@ use axum::Json;
 use log::info;
 use serde::{Deserialize, Serialize};
 use serde_json::Number;
+use std::io::{Error, ErrorKind};
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -18,8 +19,10 @@ use crate::transport::shard::Shards;
 use crate::transport::shard_op::create_table::CreateTable;
 use crate::transport::shard_op::insert::Insert;
 use crate::transport::shard_op::query::Query;
+use futures::future::{join, join_all, BoxFuture, FutureExt};
+use tokio::io;
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CreateTableRequest {
     name: String,
     columns: Vec<Column>,
@@ -91,7 +94,7 @@ impl<'a> From<&'a ColumnValue> for ColumnType {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct InsertRequest {
     insert: Vec<String>,
     into: String,
@@ -119,7 +122,7 @@ impl InsertRequest {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct QueryRequest {
     select: Vec<String>,
     from: String,
@@ -306,28 +309,53 @@ pub async fn create_table(
     State(state): State<DatabaseState>,
     Json(request): Json<CreateTableRequest>,
 ) -> Json<String> {
-    // We broadcast table creation to all shards.
-    if let Some(shards) = state.shards.deref() {
-        let create_table = CreateTable::new(&request);
-        if let Err(error) = shards.broadcast(create_table).await {
-            info!("Error while creating table in the shards: {}", error);
-            return Json(format!(
-                "Error while creating table  in the shards: {}",
-                error
-            ));
-        };
+    // Create a future for the shard broadcast operation
+    let shard_broadcast_future = async {
+        if let Some(shards) = state.shards.deref() {
+            let create_table = CreateTable::new(&request);
+            shards.broadcast(create_table).await.map_err(|e| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Error while creating table in the shards: {}", e),
+                )
+            })?;
+        }
+
+        Ok(())
     }
+    .boxed();
 
-    let columns = request.columns.into_iter().map(|c| c.into()).collect();
+    // Create a future for the local table creation operation
+    let request = request.clone();
+    let local_create_future = async {
+        let columns = request.columns.into_iter().map(|c| c.into()).collect();
+        TableDefinition::create(state.config.clone(), request.name, columns)
+            .await
+            .map_err(|e| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Error while creating table in the shards: {}", e),
+                )
+            })?;
 
-    match TableDefinition::create(state.config.clone(), request.name, columns).await {
-        Ok(_) => {
+        Ok(())
+    }
+    .boxed();
+
+    let (shard_result, local_result): (io::Result<()>, io::Result<()>) =
+        join(shard_broadcast_future, local_create_future).await;
+    match (shard_result, local_result) {
+        (Ok(_), Ok(_)) => {
             info!("Table created successfully");
             Json("Table created successfully".to_string())
         }
-        Err(error) => {
-            info!("Unable to create table: {}", error);
-            Json(format!("Unable to create table: {}", error))
+        (Err(e), _) => {
+            info!("Error in shard table creation: {}", e);
+            Json(format!("Error in shard table creation: {}", e))
+        }
+        (_, Err(e)) => {
+            info!("Error in local table creation: {}", e);
+            Json(format!("Error in local table creation: {}", e))
         }
     }
 }
@@ -336,91 +364,137 @@ pub async fn insert(
     State(state): State<DatabaseState>,
     Json(mut request): Json<InsertRequest>,
 ) -> Json<String> {
-    // We unicast in a round-robin fashion the insertions to the shards.
+    let mut requests = vec![];
     if let Some(shards) = state.shards.deref() {
-        let mut requests = request.split(shards.number_of_shards() + 1);
+        requests = request.split(shards.number_of_shards() + 1);
         request = requests.remove(0);
-
-        for request in requests {
-            let insert = Insert::new(&request);
-            if let Err(error) = shards.rr_unicast(insert).await {
-                info!("Error while inserting data in the shards: {}", error);
-                return Json(format!(
-                    "Error while inserting data in the shards: {}",
-                    error
-                ));
-            }
-        }
     }
 
-    let Ok(table_definition) = TableDefinition::open(state.config.clone(), request.into).await
-    else {
-        info!("Could not open table");
-        return Json("Could not open table".to_string());
-    };
+    // Create futures for each shard insertion operation
+    let shard_insert_futures = requests
+        .into_iter()
+        .map(|request| {
+            let shards = state.shards.clone();
+            async move {
+                if let Some(shards) = shards.deref() {
+                    let insert = Insert::new(&request);
+                    shards.rr_unicast(insert).await.map_err(|error| {
+                        Error::new(
+                            ErrorKind::InvalidData,
+                            format!("Error while inserting data in the shards: {}", error),
+                        )
+                    })?;
+                }
 
-    let Ok(mut table) = table_definition.load().await else {
-        info!("Could not load table");
-        return Json("Could not load table".to_string());
-    };
+                Ok(())
+            }
+            .boxed()
+        })
+        .collect::<Vec<BoxFuture<io::Result<()>>>>();
 
-    if let Err(error) = table.insert(request.insert, request.values).await {
-        info!("Could not write into the table: {}", error);
-        return Json(format!("Could not write into the table: {}", error));
-    };
+    // Create a future for all shard insertions
+    let shard_insert_future = async {
+        let results = join_all(shard_insert_futures).await;
+        if let Some(error) = results.into_iter().find(|r| r.is_err()) {
+            error?;
+        }
 
-    info!("Data inserted successfully");
-    Json("Data inserted successfully".to_string())
+        Ok(())
+    }
+    .boxed();
+
+    // Create a future for the table insertion operation
+    let request = request.clone();
+    let table_insert_future = async {
+        let table_definition = TableDefinition::open(state.config.clone(), request.into).await?;
+        let mut table = table_definition.load().await?;
+        table.insert(request.insert, request.values).await?;
+        Ok(())
+    }
+    .boxed();
+
+    // Join the shard insertion and table insertion futures
+    let (shard_result, table_result): (io::Result<()>, io::Result<()>) =
+        join(shard_insert_future, table_insert_future).await;
+
+    match (shard_result, table_result) {
+        (Ok(_), Ok(_)) => {
+            info!("Data inserted successfully");
+            Json("Data inserted successfully".to_string())
+        }
+        (Err(e), _) => {
+            info!("Error in shard insertion: {}", e);
+            Json(format!("Error in shard insertion: {}", e))
+        }
+        (_, Err(e)) => {
+            info!("Error in table insertion: {}", e);
+            Json(format!("Error in table insertion: {}", e))
+        }
+    }
 }
 
 pub async fn query(
     State(state): State<DatabaseState>,
     Json(request): Json<QueryRequest>,
 ) -> Json<QueryResponse> {
-    // We broadcast the query request to all shards.
-    let mut shard_query_results = vec![];
-    if let Some(shards) = state.shards.deref() {
-        let query = Query::new(&request);
-        match shards.broadcast(query).await {
-            Ok(query_responses) => {
-                for query_response in query_responses {
-                    shard_query_results.push(query_response.to_query_result());
+    // Create a future for the broadcast operation
+    let broadcast_future = async {
+        let mut shard_query_results = vec![];
+        if let Some(shards) = state.shards.deref() {
+            let query = Query::new(&request);
+            match shards.broadcast(query).await {
+                Ok(query_responses) => {
+                    for query_response in query_responses {
+                        shard_query_results.push(query_response.to_query_result());
+                    }
+                }
+                Err(error) => {
+                    info!("Error while querying data from the shards: {}", error);
                 }
             }
-            Err(error) => {
-                info!("Error while querying data from the shards: {}", error);
-                return Json(QueryResponse::empty());
+        }
+
+        shard_query_results
+    }
+    .boxed();
+
+    // Create a future for the table query operation
+    let request = request.clone();
+    let table_query_future = async {
+        let table_definition = TableDefinition::open(state.config.clone(), request.from).await;
+        match table_definition {
+            Ok(table_def) => match table_def.load().await {
+                Ok(mut table) => table.query(request.select, request.group_by).await,
+                Err(_) => {
+                    info!("Could not load table");
+                    Err(Error::new(ErrorKind::InvalidData, "Could not load table"))
+                }
+            },
+            Err(_) => {
+                info!("Could not open table");
+                Err(Error::new(ErrorKind::InvalidData, "Could not open table"))
             }
         }
     }
+    .boxed();
 
-    let Ok(table_definition) = TableDefinition::open(state.config.clone(), request.from).await
-    else {
-        info!("Could not open table");
-        return Json(QueryResponse::empty());
-    };
-
-    let Ok(mut table) = table_definition.load().await else {
-        info!("Could not load table");
-        return Json(QueryResponse::empty());
-    };
-
-    match table.query(request.select, request.group_by).await {
-        Ok(query_result) => {
-            let mut query_result = query_result;
-
+    let (shard_query_results, table_query_result) =
+        join(broadcast_future, table_query_future).await;
+    match table_query_result {
+        Ok(mut query_result) => {
             for shard_query_result in shard_query_results {
-                let Ok(merged_query_result) = query_result.merge(shard_query_result) else {
-                    info!("Merging of query results failed");
-                    return Json(QueryResponse::empty());
-                };
-                query_result = merged_query_result;
+                match query_result.merge(shard_query_result) {
+                    Ok(merged_result) => query_result = merged_result,
+                    Err(_) => {
+                        info!("Merging of query results failed");
+                        return Json(QueryResponse::empty());
+                    }
+                }
             }
-
             Json(serialize_query_result(query_result))
         }
         Err(error) => {
-            info!("Error while querying table {}: {}", table.name(), error);
+            info!("Error while querying table: {}", error);
             Json(QueryResponse::empty())
         }
     }

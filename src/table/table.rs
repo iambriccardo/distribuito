@@ -190,10 +190,6 @@ pub struct Table {
 }
 
 impl Table {
-    pub fn name(&self) -> &str {
-        &self.definition.name
-    }
-
     pub async fn insert(
         &mut self,
         columns: Vec<String>,
