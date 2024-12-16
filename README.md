@@ -21,4 +21,4 @@ I hope to be able to finish all the distributed query execution to make the proj
 
 - Column-oriented with nearly infinite scalability for adding new columns.
 - File-based with an efficient custom file format (Apache Parquet support could be added in the future).
-- Distributed query execution across multiple nodes (still TBD).
+- Distributed query execution across multiple nodes.
